@@ -1,0 +1,13 @@
+.env.factory
+secrets/
+workspace/runs/
+workspace/inbox/*.json
+workspace/inbox/processing/
+workspace/inbox/done/
+workspace/inbox/parked/
+workspace/inbox/rejected/
+hoststat/hoststat.json
+build/
+__pycache__/
+.pytest_cache/
+.ruff_cache/

@@ -1,0 +1,4 @@
+{"ticket": {"ticket_id": "TRI-EXAMPLE-2", "title": "Cart rejects negative quantities",
+            "body": "cart.add_item(sku, qty) currently accepts qty <= 0. It must raise ValueError('quantity must be >= 1') and leave the cart unchanged.",
+            "repo": "your-org/your-repo", "language": "python"},
+ "expected_accept": true}

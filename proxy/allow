@@ -1,0 +1,8 @@
+^api\.anthropic\.com$
+^openrouter\.ai$
+^generativelanguage\.googleapis\.com$
+^api\.openai\.com$
+^github\.com$
+^api\.github\.com$
+^codeload\.github\.com$
+^host\.docker\.internal$

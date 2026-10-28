@@ -1,0 +1,100 @@
+# Factory services, layered on your existing stack (postgres + self-hosted Langfuse):
+#   docker compose -f compose.yml -f compose.factory.yml up -d --build
+# Service names `postgres` and `langfuse-web` must match your compose.yml; rename below if they differ.
+
+x-orchestrator-env: &orch_env
+  FACTORY_DB_DSN: postgresql://factory:${FACTORY_DB_PASSWORD}@postgres:5432/factory
+  POOL_FILE: /app/pool.yaml
+  QUALIFICATION_DIR: /app/qualification
+  OMLX_BASE_URL: http://host.docker.internal:8000/v1
+  BROKER_URL: http://sandbox-broker:8080
+  LANGFUSE_HOST: http://langfuse-web:3000
+  LANGFUSE_PUBLIC_URL: http://localhost:3000
+  RUN_CAP_USD: "2.00"
+  DAY_CAP_USD: "10.00"
+  FACTORY_TZ: Asia/Singapore
+  HTTP_PROXY: http://egress-proxy:8888
+  HTTPS_PROXY: http://egress-proxy:8888
+  http_proxy: http://egress-proxy:8888
+  https_proxy: http://egress-proxy:8888
+  NO_PROXY: postgres,langfuse-web,sandbox-broker,localhost
+  no_proxy: postgres,langfuse-web,sandbox-broker,localhost
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"     # Agent SDK: no telemetry or update checks
+
+x-hardened: &hardened
+  user: "10001:10001"
+  read_only: true
+  tmpfs: ["/tmp:size=256m"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+networks:
+  control: { internal: true }      # orchestrator <-> broker <-> proxy
+  data:    { internal: true }      # orchestrator <-> postgres, langfuse
+  egress:  {}                      # proxy only
+
+services:
+  orchestrator:
+    <<: *hardened
+    build: ./orchestrator
+    command: ["factory.runner", "serve"]
+    networks: [control, data]
+    environment: *orch_env
+    env_file: [.env.factory]       # CLAUDE_CODE_OAUTH_TOKEN, LANGFUSE_*_KEY, ALERT_WEBHOOK_URL, optional keys
+    secrets: [github_token]
+    volumes:
+      - ./workspace:/workspace:rw
+      - ./hoststat:/hoststat:ro
+      - ./pool.yaml:/app/pool.yaml:ro
+      - ./qualification:/app/qualification:ro
+      - ./github.yaml:/app/github.yaml:ro
+    depends_on: [sandbox-broker, egress-proxy]
+    mem_limit: 1g
+    restart: unless-stopped
+
+  pool-worker:
+    <<: *hardened
+    build: ./orchestrator
+    command: ["factory.pool_worker", "serve"]
+    networks: [control, data]
+    environment: *orch_env
+    env_file: [.env.factory]
+    secrets: [github_token]
+    volumes:
+      - ./workspace:/workspace:rw
+      - ./hoststat:/hoststat:ro
+      - ./pool.yaml:/app/pool.yaml:ro
+      - ./qualification:/app/qualification:ro
+      - ./github.yaml:/app/github.yaml:ro
+    depends_on: [sandbox-broker, egress-proxy]
+    mem_limit: 768m
+    restart: unless-stopped
+
+  sandbox-broker:
+    build: ./sandbox_broker
+    networks: [control]            # no egress
+    environment:
+      HOST_WORKSPACE_ROOT: ${PWD}/workspace      # absolute macOS path, needed for runner bind mounts
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    mem_limit: 256m
+    restart: unless-stopped
+
+  egress-proxy:
+    image: vimagick/tinyproxy
+    networks: [control, egress]
+    volumes:
+      - ./proxy/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
+      - ./proxy/allow:/etc/tinyproxy/allow:ro
+    mem_limit: 64m
+    restart: unless-stopped
+
+  # Existing services: attach them to the factory's internal data network.
+  postgres:
+    networks: [data, default]
+  langfuse-web:
+    networks: [data, default]      # default network keeps the UI on localhost:3000
+
+secrets:
+  github_token:
+    file: ./secrets/github_token

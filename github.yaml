@@ -1,0 +1,17 @@
+# github.yaml — GitHub intake (spec §5.6, decision D9). Mounted read-only at /app/github.yaml.
+enabled: true                         # false = inbox-only mode (JSON files in workspace/inbox/)
+poll_interval_s: 120                  # per pass over all repos; idle polls cost nothing (ETag -> 304)
+trigger_label: "factory:ready"        # a maintainer adds this to hand an issue to the factory
+approve_label: "factory:approve"      # a maintainer adds this to open the draft PR (human gate, D1)
+
+# Who may apply the two labels above. Empty = anyone with write, maintain or admin access.
+# Logins listed here are trusted even without write access.
+labelers: []
+allowlist_only: false                 # true = ONLY the logins above, ignore repo permissions
+
+comment_on_status: true               # post a short comment at each status change
+
+repos:
+  - repo: your-org/your-repo          # owner/name; the GitHub token must cover it
+    base_branch: main
+    language: python                  # python | typescript; build its runner image with make runner-py/ts

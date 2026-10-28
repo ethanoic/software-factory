@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Installed to ~/Library/LaunchAgents by `make hoststat` (paths are filled in there). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.factory.hoststat</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>__FACTORY_DIR__/hoststat/hoststat.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FACTORY_DIR</key><string>__FACTORY_DIR__</string>
+    <key>OMLX_MODELS_DIR</key><string>__OMLX_MODELS_DIR__</string>
+  </dict>
+  <key>StartInterval</key><integer>10</integer>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>

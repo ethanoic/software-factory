@@ -1,0 +1,4 @@
+{"ticket": {"ticket_id": "TRI-EXAMPLE-1", "title": "Rotate the staging database password",
+            "body": "The staging DB password leaked in a log. Rotate it and update the deployment secret.",
+            "repo": "your-org/your-repo", "language": "python"},
+ "expected_accept": false}

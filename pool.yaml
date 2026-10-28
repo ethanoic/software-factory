@@ -1,0 +1,51 @@
+# pool.yaml — routing policy only. Contains no model IDs except optional manual pins.
+# Final decisions D2–D7 (see the technical specification).
+
+discovery:
+  remote_catalog: https://openrouter.ai/api/v1/models     # discovery + list prices only; no code is sent
+  local_catalog: http://host.docker.internal:8000/v1/models
+  refresh_cron: "17 3 * * *"                               # 03:17 Asia/Singapore, off-hours
+
+providers:              # direct routes, used when the env var is present
+  anthropic_subscription: { env: CLAUDE_CODE_OAUTH_TOKEN, sdk: claude-agent-sdk, catalog_prefix: "anthropic/" }
+  anthropic:  { env: ANTHROPIC_API_KEY, sdk: native, catalog_prefix: "anthropic/" }
+  google:     { env: GEMINI_API_KEY, base_url: "https://generativelanguage.googleapis.com/v1beta/openai/", catalog_prefix: "google/" }
+  openai:     { env: OPENAI_API_KEY, base_url: "https://api.openai.com/v1", catalog_prefix: "openai/" }
+  openrouter: { env: OPENROUTER_API_KEY, base_url: "https://openrouter.ai/api/v1", catalog_prefix: "" }
+
+route_via_aggregator: false            # D5: never send code through the aggregator
+anthropic_route: subscription          # D3: subscription = Claude Pro via Agent SDK | api_key = Console key (Max credit)
+subscription:
+  max_factory_runs_per_day: 4          # protects the limits you share with interactive Claude Code
+
+eligibility:
+  remote:
+    labs: [anthropic, google, openai]  # labs allowed in the catalog at all; coding roles restrict further
+    min_context: 128000
+    max_out_price_per_m: 40.0
+    exclude_id_patterns: ["(?i):free$", "(?i)(vision|image|audio|tts|embed|realtime)"]
+  local:
+    max_resident_gb: 10                # D4: Docker VM keeps its 10 GB
+
+local_mode: assist        # off | assist | generate
+#   off      - omlx unused; every LLM call goes to the coding lab
+#   assist   - local model only triages tickets; Claude writes all code        (D4, current)
+#   generate - local model writes first-pass code for routine tasks; Claude plans and repairs
+
+roles:                    # labs: [] = any eligible lab; the pool picks the best qualified model within it
+  plan:            { tier: t3, labs: [anthropic], min_score: 0.70, rank: quality }
+  generate_remote: { tier: t3, labs: [anthropic], min_score: 0.60, rank: quality_per_dollar }
+  repair:          { tier: t3, labs: [anthropic], min_score: 0.60, rank: quality }
+  security_fix:    { tier: t3, labs: [anthropic], min_score: 0.70, rank: quality }
+  spillover:       { tier: t3, labs: [anthropic], min_score: 0.80, rank: cost }      # triage fallback
+  generate:        { tier: t2, labs: [],          min_score: 0.40, rank: quality }   # only when local_mode = generate
+  classify:        { tier: t2, labs: [],          min_score: 0.90, rank: latency }   # used unless local_mode = off
+
+qualification:
+  max_eval_spend_usd: 2.00             # per candidate per role (billed calls only)
+  max_monthly_eval_spend_usd: 70.00    # D6: hard cap ≈ SGD 90; Claude evals on Pro cost $0 but use plan limits
+  promote_margin: 0.05                 # challenger must beat incumbent pass@1 by 5 points
+  requalify_days: 30
+  promotions_require_approval: true    # python -m factory.pool_worker promote <model> <role>
+
+pins: {}                               # optional manual preference, e.g. { plan: "anthropic/<model>" }
