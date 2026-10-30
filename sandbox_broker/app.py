@@ -16,6 +16,7 @@ from requests.exceptions import ReadTimeout
 
 HOST_ROOT = os.environ["HOST_WORKSPACE_ROOT"]          # absolute macOS path of ./workspace
 IMAGES = {"python": os.environ.get("RUNNER_IMAGE_PY", "factory-runner-py:locked"),
+          "javascript": os.environ.get("RUNNER_IMAGE_TS", "factory-runner-ts:locked"),   # same Node runner
           "typescript": os.environ.get("RUNNER_IMAGE_TS", "factory-runner-ts:locked")}
 RUN_ID = re.compile(r"^[a-z0-9-]{8,64}$")
 WALL_S = int(os.environ.get("RUNNER_WALL_S", "300"))

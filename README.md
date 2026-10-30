@@ -5,6 +5,9 @@ repair (≤ 3) → human approval → draft PR**. Claude (on your Pro plan) writ
 small local model only triages tickets. This repo is the reference implementation of the technical
 specification; where a snippet in the spec differs, this code wins.
 
+**New here?** After Setup, follow the [hello-world walkthrough](docs/hello-world-walkthrough.md): it takes
+the sample Node.js app in `examples/hello-node` from a GitHub issue to a merged PR.
+
 ```text
  GitHub issues labelled factory:ready (polled)  +  workspace/inbox/*.json
         │
@@ -72,15 +75,23 @@ repo's files next to it.
 
 ## Qualify before the first ticket
 
-No model can fill a role until it passes your suite (D2), so the first factory run halts with
-"no qualified model" until you do this:
+No model can fill a role until it passes your suite (D2) or you trust it by hand, so the first factory run
+halts with "no qualified model" until you do one of the two.
+
+**To get started: trust a model.** `make pool ARGS="refresh"` lists the discovered models; then
+`make pool ARGS="trust <model_id>"` approves one for every role it can fill (Claude: all coding roles plus
+`spillover`; a local model: `generate` and `classify`). A trusted model is marked *not measured*, is
+replaced by its first real measurement, and stops counting when that role's suite files change. The
+[walkthrough](docs/hello-world-walkthrough.md#5-start-the-factory-and-approve-a-model) uses this path.
+
+**Before Phase 3: measure.**
 
 1. Add 10–20 solved tickets to `qualification/code/` and 50 labelled tickets to
    `qualification/triage/` (formats in `qualification/README.md`). Delete the two examples.
-2. Run one cycle now: `docker compose -f compose.yml -f compose.factory.yml exec pool-worker python -m factory.pool_worker once`
-3. Read the alerts (or `... pool_worker list`) and approve the winners:
-   `... python -m factory.pool_worker promote <model_id> <role>` for `plan`, `generate_remote`,
-   `repair`, `security_fix`, `spillover` and `classify`.
+2. Run one cycle now: `make pool ARGS="once"`
+3. Read the alerts (or `make pool ARGS="list"`) and approve the winners:
+   `make pool ARGS="promote <model_id> <role>"` for `plan`, `generate_remote`, `repair`,
+   `security_fix`, `spillover` and `classify`. An empty suite folder is skipped, never scored.
 
 Code-suite qualification runs on your Pro limits. Run it in the evening, not while you are coding.
 
@@ -148,7 +159,7 @@ These need the running stack and are checked by hand in Phase 1:
 
 ## What has been tested, and what has not
 
-Tested in this build (`make test`, 52 tests; set `FACTORY_TEST_DSN` to include the 16 Postgres ones):
+Tested in this build (`make test`, 64 tests; set `FACTORY_TEST_DSN` to include the 20 Postgres ones):
 routing for all three `local_mode`s, diff validation and forbidden paths, every FSM router, the real
 LangGraph wiring with stubbed nodes (repair loop, 3-repair cap, human gate, tamper halt), the breaker
 against real Postgres (run cap, daily cap, persistent trip), pool selection and catalog refresh,
@@ -156,8 +167,11 @@ GitHub intake against a fake GitHub API (labeller checks, PR skipping, no double
 polls, status labels and comments, approval by label, allowlist mode, GitHub outages),
 parking on Claude plan limits and resuming from the Postgres checkpoint without re-running finished
 steps, and the Agent SDK adapter against the real `ClaudeAgentOptions` of the locked SDK version.
-The runner entrypoint was also run end to end on a sample repo: wrong patch → assertion → repair →
-green → QA → dry-run PR → tamper detected.
+Manual trust, promotion and the `pool_worker` commands were run against Postgres. The runner entrypoint
+was run end to end through the real factory steps on a Python sample (wrong patch → repair → green →
+dry-run PR → tamper detected) and on `examples/hello-node` with the Node runner's exact tooling (wrong
+logic → assertion; unused variable → lint repair; `eval` → blocking security finding; clean fix → dry-run
+PR; no ESLint config → lint skipped; Jest missing → halt, not a paid repair).
 
 Not yet exercised (Phase 0–1 on your Mac): Docker builds and the broker's container isolation, the
 egress proxy, real Claude/omlx calls, Langfuse ingestion, and the real GitHub API (push, PR creation,

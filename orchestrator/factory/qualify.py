@@ -106,7 +106,7 @@ def qualify_candidates(pool: ModelPool, deps) -> None:
             print(f"[qualify] monthly eval cap ${monthly_cap:.2f} reached; remaining candidates wait", flush=True)
             return
         spec = pool.spec(model_id)
-        if spec is None:
+        if spec is None or not _tasks(role):            # never score a model against an empty suite
             continue
         try:
             if spec.route == "anthropic_subscription" and not probe(pool, model_id):

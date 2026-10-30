@@ -33,7 +33,8 @@ def plan(ticket, repo_map: str) -> list[dict]:
         "test_sources": {"tests/test_feature.py": "full file content"},
         "complexity": "trivial | routine | complex",
     }
-    test_tool = "pytest" if ticket.language == "python" else "Jest"
+    test_tool = ("pytest" if ticket.language == "python"
+                 else "Jest, using the same module style as the repo's existing tests (require or import)")
     return [
         {"role": "system", "content": (
             "You are the planning stage of an automated coding pipeline. Produce a plan and the acceptance "

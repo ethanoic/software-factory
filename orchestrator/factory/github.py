@@ -60,8 +60,8 @@ def validate(cfg: dict) -> dict:
         if not REPO_RE.fullmatch(r.get("repo", "")):
             raise SystemExit(f"github.yaml: invalid repo {r.get('repo')!r} (expected owner/name)")
         r.setdefault("base_branch", "main")
-        if r.setdefault("language", "python") not in ("python", "typescript"):
-            raise SystemExit(f"github.yaml: {r['repo']} language must be python or typescript")
+        if r.setdefault("language", "python") not in ("python", "javascript", "typescript"):
+            raise SystemExit(f"github.yaml: {r['repo']} language must be python, javascript or typescript")
     return cfg
 
 

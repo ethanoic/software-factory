@@ -20,7 +20,7 @@ class TicketSpec(BaseModel):
     body: str                           # UNTRUSTED. Never interpolated into shell commands.
     repo: str                           # "owner/repo"
     base_branch: str = "main"
-    language: Literal["python", "typescript"]
+    language: Literal["python", "javascript", "typescript"]   # javascript and typescript share the Node runner
     issue_number: int | None = None     # set when the ticket came from GitHub intake (spec §5.6)
 
 

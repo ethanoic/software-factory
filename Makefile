@@ -6,7 +6,7 @@ DEPS ?=
 OMLX_MODELS ?= $(HOME)/models/mlx
 PY ?= python3
 
-.PHONY: help init lock db hoststat runner-py runner-ts up down logs test check status approve
+.PHONY: help init lock db hoststat runner-py runner-ts up down logs test check status approve pool
 
 help:
 	@echo "init      create folders, secrets placeholder, .env.factory"
@@ -14,9 +14,10 @@ help:
 	@echo "db        create the factory database and role in your postgres"
 	@echo "hoststat  install the macOS memory sensor (launchd)"
 	@echo "runner-py DEPS=<repo>  build the Python runner image with that repo's deps"
-	@echo "runner-ts DEPS=<repo>  build the TypeScript runner image with that repo's deps"
+	@echo "runner-ts DEPS=<repo>  build the Node (JavaScript or TypeScript) runner image with that repo's deps"
 	@echo "up / down / logs       start, stop, follow the factory"
 	@echo "test      run the factory's own unit tests (no services needed)"
+	@echo "pool ARGS=...          model pool: refresh, catalog, list, trust, promote, once"
 
 init:
 	mkdir -p workspace/inbox workspace/runs hoststat secrets qualification/code qualification/triage
@@ -67,6 +68,10 @@ logs:
 
 status:
 	$(COMPOSE) exec orchestrator python -m factory.runner status
+
+pool:
+	@test -n "$(ARGS)" || (echo 'usage: make pool ARGS="refresh | catalog | list | trust <model> [roles] | promote <model> <role> | once"' && exit 1)
+	$(COMPOSE) exec pool-worker python -m factory.pool_worker $(ARGS)
 
 approve:
 	@test -n "$(RUN)" || (echo "usage: make approve RUN=<run_id>" && exit 1)

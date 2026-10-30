@@ -333,21 +333,75 @@ class ModelPool:
 
     # -------- qualification records --------
     def record(self, model_id: str, role: str, score: float, usd: float, latency: float, status: str) -> None:
+        """Store a MEASURED result. It replaces a manual trust for the same suite; a promoted model that
+        re-qualifies keeps its promotion (only a failed re-measurement demotes it)."""
         with psycopg.connect(self.dsn, autocommit=True) as c:
             c.execute("""INSERT INTO model_qualification
-                (model_id, role, suite_sha256, pass_at_1, usd_per_task, p50_latency_s, status)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                (model_id, role, suite_sha256, pass_at_1, usd_per_task, p50_latency_s, status, manual)
+                VALUES (%s,%s,%s,%s,%s,%s,%s, false)
                 ON CONFLICT (model_id, role, suite_sha256) DO UPDATE SET pass_at_1 = EXCLUDED.pass_at_1,
                   usd_per_task = EXCLUDED.usd_per_task, p50_latency_s = EXCLUDED.p50_latency_s,
-                  status = EXCLUDED.status, qualified_at = now()""",
+                  status = CASE WHEN model_qualification.status = 'promoted' AND EXCLUDED.status = 'qualified'
+                                THEN 'promoted' ELSE EXCLUDED.status END,
+                  manual = false, qualified_at = now()""",
                       (model_id, role, suite_sha(role), score, usd, latency, status))
 
-    def promote(self, model_id: str, role: str) -> None:
+    def promote(self, model_id: str, role: str) -> bool:
+        """Human approval of a qualified challenger. False if it has no qualification for the current suite."""
+        sha = suite_sha(role)
         with psycopg.connect(self.dsn) as c, c.transaction():
-            c.execute("UPDATE model_qualification SET status = 'qualified' WHERE role = %s AND status = 'promoted'",
-                      (role,))
+            exists = c.execute("""SELECT 1 FROM model_qualification WHERE role = %s AND model_id = %s
+                                  AND suite_sha256 = %s AND status IN ('qualified','promoted')""",
+                               (role, model_id, sha)).fetchone()
+            if not exists:
+                return False
+            c.execute("""UPDATE model_qualification SET status = 'qualified'
+                         WHERE role = %s AND suite_sha256 = %s AND status = 'promoted'""", (role, sha))
             c.execute("""UPDATE model_qualification SET status = 'promoted'
-                         WHERE role = %s AND model_id = %s AND suite_sha256 = %s""", (role, model_id, suite_sha(role)))
+                         WHERE role = %s AND model_id = %s AND suite_sha256 = %s""", (role, model_id, sha))
+        return True
+
+    def trust_roles(self, model_id: str) -> list[str] | None:
+        """Roles a catalog model may fill: same tier, and its lab allowed by the role's `labs`.
+        None when the model is not in the current catalog."""
+        with psycopg.connect(self.dsn) as c:
+            r = c.execute("SELECT tier, lab FROM model_catalog WHERE model_id = %s AND NOT retired",
+                          (model_id,)).fetchone()
+        if r is None:
+            return None
+        tier, lab = r
+        return [role for role, cfg in policy()["roles"].items()
+                if cfg["tier"] == tier and (not cfg.get("labs") or lab in cfg["labs"])]
+
+    def trust(self, model_id: str, roles: list[str] | None = None) -> list[str]:
+        """Manual approval WITHOUT measurement, for getting started. Recorded with manual=true and
+        pass_at_1 = the role's min_score (not a measured number). Any later measurement replaces it,
+        and changing a role's qualification suite invalidates it."""
+        allowed = self.trust_roles(model_id)
+        if allowed is None:
+            raise ValueError(f"{model_id} is not in the current catalog; run `pool_worker refresh` "
+                             "and pick an id from `pool_worker catalog`")
+        roles = roles or allowed
+        bad = [r for r in roles if r not in allowed]
+        if bad:
+            raise ValueError(f"{model_id} cannot fill {bad} (wrong tier or lab); allowed: {allowed}")
+        with psycopg.connect(self.dsn) as c, c.transaction():
+            for role in roles:
+                sha = suite_sha(role)
+                c.execute("""UPDATE model_qualification SET status = 'qualified'
+                             WHERE role = %s AND suite_sha256 = %s AND status = 'promoted'""", (role, sha))
+                c.execute("""INSERT INTO model_qualification
+                    (model_id, role, suite_sha256, pass_at_1, usd_per_task, p50_latency_s, status, manual)
+                    VALUES (%s,%s,%s,%s,0,0,'promoted',true)
+                    ON CONFLICT (model_id, role, suite_sha256) DO UPDATE SET status = 'promoted',
+                      manual = true, pass_at_1 = EXCLUDED.pass_at_1, qualified_at = now()""",
+                          (model_id, role, sha, policy()["roles"][role]["min_score"]))
+        return roles
+
+    def catalog(self) -> list[tuple]:
+        with psycopg.connect(self.dsn) as c:
+            return c.execute("""SELECT model_id, tier, coalesce(direct_route, '-'), in_per_m, out_per_m, ctx
+                                FROM model_catalog WHERE NOT retired ORDER BY tier DESC, lab, model_id""").fetchall()
 
     def promoted(self, role: str):
         with psycopg.connect(self.dsn) as c:
@@ -361,7 +415,7 @@ class ModelPool:
         pairs = []
         with psycopg.connect(self.dsn) as c:
             for role, cfg in P["roles"].items():
-                if not suite_dir(role).exists():
+                if not any(suite_dir(role).glob("*.json")):      # no suite, or an empty one: nothing to measure
                     continue
                 labs = cfg.get("labs") or []
                 rows = c.execute("""
@@ -370,6 +424,7 @@ class ModelPool:
                       AND (cardinality(%s::text[]) = 0 OR m.lab = ANY(%s::text[]))
                       AND NOT EXISTS (SELECT 1 FROM model_qualification q
                                       WHERE q.model_id = m.model_id AND q.role = %s AND q.suite_sha256 = %s
+                                        AND NOT q.manual          -- trusted models still get measured
                                         AND q.qualified_at > now() - make_interval(days => %s))
                     ORDER BY m.last_seen DESC""",
                                  (cfg["tier"], labs, labs, role, suite_sha(role), days)).fetchall()
