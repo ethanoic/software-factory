@@ -28,15 +28,24 @@ else
   # Dependencies were installed into the image from the target repo's lockfile.
   [ -e node_modules ] || ln -s /opt/deps/node_modules node_modules
   mapfile -t files < <(changed '\.(ts|tsx|js|jsx|mjs|cjs)$')
+  echo '[]' > "$out/lint.json"; lint=0
   if [ "${#files[@]}" -gt 0 ]; then
-    /opt/factory/node_modules/.bin/eslint -f json "${files[@]}" > "$out/lint.json" 2>/dev/null; lint=$?
+    # Style lint uses the repo's own ESLint flat config; ESLint 9 fails outright without one, so skip it then.
+    if compgen -G "eslint.config.*" > /dev/null; then
+      /opt/factory/node_modules/.bin/eslint -f json "${files[@]}" > "$out/lint.json" 2>/dev/null; lint=$?
+    fi
+    # Security scan always runs, with the factory's config (see eslint.security.mjs).
     /opt/factory/node_modules/.bin/eslint --no-config-lookup -c /opt/factory/eslint.security.mjs \
       -f json "${files[@]}" > "$out/qa.json" 2>/dev/null || true
-  else
-    echo '[]' > "$out/lint.json"; lint=0
   fi
-  npx --offline jest --ci --json --outputFile="$out/jest.json" --testTimeout=60000 \
-    > "$out/test.log" 2>&1; test=$?
+  # The repo's own Jest, baked into the image from its lockfile. No npx: it could fetch or pick another version.
+  if [ -x node_modules/.bin/jest ]; then
+    node_modules/.bin/jest --ci --json --outputFile="$out/jest.json" --testTimeout=60000 \
+      > "$out/test.log" 2>&1; test=$?
+  else
+    echo "factory: jest not installed in the runner image (add it to devDependencies, then make runner-ts)" \
+      > "$out/test.log"; test=127
+  fi
 fi
 
 printf '{"lint_exit":%d,"test_exit":%d}\n' "$lint" "$test" > "$out/result.json"

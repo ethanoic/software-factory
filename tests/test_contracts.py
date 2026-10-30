@@ -294,3 +294,60 @@ def test_repair_prompt_splits_stable_prefix_for_caching():
     s["patch"] = Patch(unified_diff="d2", produced_by=Tier.T3_REMOTE, model="m")
     m2 = prompts.repair(s, {"app.py": "src"}, [{"attempt": 1}])
     assert m1[:2] == m2[:2] and m1[2] != m2[2]
+
+
+# ------------------------------------------------------------------ Node runner path (hello-node)
+def test_traceback_paths_are_mapped_to_repo_relative(tmp_path):
+    from factory.nodes import mentioned_files
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "greet.js").write_text("x")
+    log = (f"at greet ({tmp_path}/src/greet.js:9:3)\n  at /workspace/src/greet.js:2\n"
+           "  at node_modules/jest-circus/build/x.js:1\n  /etc/passwd.js  ../../escape.js  ./src/greet.js")
+    assert mentioned_files(tmp_path, log) == ["src/greet.js"]
+
+
+@pytest.mark.parametrize("log", [
+    "factory: jest not installed in the runner image (add it to devDependencies, then make runner-ts)",
+    "No tests found, exiting with code 1\nRun with `--passWithNoTests` to exit with code 0",
+    "Cannot find module 'lodash' from 'src/greet.js'",
+])
+def test_node_harness_problems_halt_instead_of_paid_repair(tmp_path, log):
+    (tmp_path / "test.log").write_text(log)
+    assert classify_failure(tmp_path, {"exit_code": 1})[0] is FailureClass.ENVIRONMENT
+
+
+def test_missing_relative_module_is_a_code_failure(tmp_path):
+    (tmp_path / "test.log").write_text("Cannot find module '../src/farewell' from 'tests/farewell.test.js'")
+    (tmp_path / "jest.json").write_text(json.dumps({"numPassedTests": 2, "numFailedTests": 0,
+                                                    "numRuntimeErrorTestSuites": 1}))
+    assert classify_failure(tmp_path, {"exit_code": 1})[0] is FailureClass.ASSERTION
+
+
+def test_eslint_security_errors_block_and_warnings_do_not(tmp_path):
+    from factory.nodes import qa
+
+    class D:
+        def repo_path(self, s):
+            return tmp_path
+    (tmp_path / ".factory").mkdir()
+    (tmp_path / ".factory" / "qa.json").write_text(json.dumps([{"filePath": "/workspace/src/greet.js", "messages": [
+        {"ruleId": "no-eval", "severity": 2, "line": 3, "message": "eval can be harmful."},
+        {"ruleId": "security/detect-object-injection", "severity": 1, "line": 5, "message": "Generic Object Injection Sink"}]}]))
+    r = qa({}, D())["qa"]
+    assert (r.high_findings, r.medium_findings) == (1, 1)
+
+
+def test_javascript_is_a_valid_language():
+    from factory.github import validate
+    from factory.state import TicketSpec
+    assert TicketSpec(ticket_id="t", title="t", body="b", repo="o/r", language="javascript").language == "javascript"
+    assert validate({"repos": [{"repo": "o/r", "language": "javascript"}]})["repos"][0]["language"] == "javascript"
+
+
+def test_hello_node_example_is_consistent():
+    root = pathlib.Path(__file__).resolve().parent.parent / "examples" / "hello-node"
+    pkg = json.loads((root / "package.json").read_text())
+    lock = json.loads((root / "package-lock.json").read_text())
+    assert {"jest", "eslint"} <= set(pkg["devDependencies"]) and lock["packages"][""]["devDependencies"] == pkg["devDependencies"]
+    assert (root / "eslint.config.js").exists() and (root / "tests" / "greet.test.js").exists()
+    assert "node_modules" in (root / ".gitignore").read_text()

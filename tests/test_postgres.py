@@ -192,3 +192,69 @@ def test_quota_exhausted_parks_and_resumes_from_checkpoint(db, monkeypatch):
         app.invoke(None, cfg)
         assert app.get_state(cfg).next == ("compile_pr",)
     assert calls == {"plan": 1, "generate": 2}                          # plan was NOT re-run
+
+
+# ------------------------------------------------------------------ manual trust (hello-world quick start)
+def test_trust_lets_runs_start_without_a_suite_and_is_marked_manual(db):
+    from factory.pool import ModelPool, NoQualifiedModel
+    seed(db, [("anthropic/a-x", "anthropic", "t3", 3, 15, 200000, "anthropic_subscription", False),
+              ("local/small", "local", "t2", 0, 0, 32768, "omlx", False),
+              ("google/g-x", "google", "t3", 2, 12, 200000, None, False)], [])
+    pool = ModelPool(db)
+    with pytest.raises(NoQualifiedModel):
+        pool.select("plan")
+    roles = pool.trust("anthropic/a-x")
+    assert set(roles) == {"plan", "generate_remote", "repair", "security_fix", "spillover"}
+    assert pool.select("plan").model_id == "anthropic/a-x"
+    assert pool.trust("local/small") == ["generate", "classify"]
+    with pytest.raises(ValueError, match="cannot fill"):
+        pool.trust("google/g-x", ["plan"])                    # coding roles are anthropic-only (D2)
+    with pytest.raises(ValueError, match="not in the current catalog"):
+        pool.trust("anthropic/does-not-exist")
+    with psycopg.connect(db) as c:
+        manual, score = c.execute("SELECT manual, pass_at_1 FROM model_qualification "
+                                  "WHERE model_id='anthropic/a-x' AND role='plan'").fetchone()
+    assert manual and float(score) == 0.70                    # the role's min_score, not a fake measurement
+
+
+def test_trusted_models_are_still_measured_and_measurement_wins(db, monkeypatch, tmp_path):
+    from factory import pool as poolmod
+    from factory.pool import ModelPool
+    (tmp_path / "triage").mkdir()
+    (tmp_path / "triage" / "t.json").write_text("{}")
+    monkeypatch.setattr(poolmod, "SUITE_ROOT", tmp_path)
+    seed(db, [("anthropic/a-x", "anthropic", "t3", 3, 15, 200000, "anthropic_subscription", False)], [])
+    pool = ModelPool(db)
+    pool.trust("anthropic/a-x", ["spillover"])
+    assert ("anthropic/a-x", "spillover") in pool.unscored_pairs()     # trust does not skip measurement
+    pool.record("anthropic/a-x", "spillover", 0.5, 0.0, 1.0, "rejected")
+    with psycopg.connect(db) as c:
+        status, manual = c.execute("SELECT status, manual FROM model_qualification "
+                                   "WHERE model_id='anthropic/a-x' AND role='spillover'").fetchone()
+    assert (status, manual) == ("rejected", False)
+
+
+def test_requalified_incumbent_keeps_promotion_and_promote_needs_a_row(db):
+    from factory.pool import ModelPool
+    seed(db, [("anthropic/x", "anthropic", "t3", 3, 15, 200000, "anthropic_subscription", False),
+              ("anthropic/y", "anthropic", "t3", 3, 15, 200000, "anthropic_subscription", False)],
+         [("anthropic/x", "repair", 0.8, 0, "promoted")])
+    pool = ModelPool(db)
+    pool.record("anthropic/x", "repair", 0.82, 0.01, 2.0, "qualified")   # monthly re-measurement passes
+    assert pool.promoted("repair")[0] == "anthropic/x"
+    assert pool.promote("anthropic/y", "repair") is False                # never qualified: refused, not silent
+    assert pool.promoted("repair")[0] == "anthropic/x"
+
+
+def test_empty_suite_folder_never_revokes_trust(db, monkeypatch, tmp_path):
+    """`make init` creates an empty qualification/code/: nightly qualification must skip it."""
+    from factory import pool as poolmod
+    from factory.pool import ModelPool
+    (tmp_path / "code").mkdir()
+    (tmp_path / "triage").mkdir()
+    monkeypatch.setattr(poolmod, "SUITE_ROOT", tmp_path)
+    seed(db, [("anthropic/a-x", "anthropic", "t3", 3, 15, 200000, "anthropic_subscription", False)], [])
+    pool = ModelPool(db)
+    pool.trust("anthropic/a-x")
+    assert pool.unscored_pairs() == []
+    assert pool.select("plan").model_id == "anthropic/a-x"

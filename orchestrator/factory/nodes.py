@@ -171,8 +171,10 @@ def classify_failure(out: pathlib.Path, broker: dict) -> tuple[FailureClass, int
     if broker.get("timed_out"):
         return FailureClass.TIMEOUT, 0, 0, 0, broker.get("log_tail", "")
     log = (out / "test.log").read_text(errors="replace") if (out / "test.log").exists() else broker.get("log_tail", "")
-    if re.search(r"ModuleNotFoundError: No module named|Cannot find module '(?!\.)|ERR_MODULE_NOT_FOUND", log):
-        return FailureClass.ENVIRONMENT, 0, 0, 0, log
+    if re.search(r"ModuleNotFoundError: No module named|Cannot find module '(?!\.)|ERR_MODULE_NOT_FOUND|"
+                 r"could not determine executable to run|: command not found|factory: jest not installed|"
+                 r"No tests found, exiting with code", log):   # frozen tests the runner cannot find: a human must look
+        return FailureClass.ENVIRONMENT, 0, 0, 0, log     # missing tool or dependency: rebuild the runner image
     try:
         test_exit = json.loads((out / "result.json").read_text()).get("test_exit")
     except (OSError, ValueError):
@@ -236,15 +238,35 @@ def qa(state, deps):
 
 
 # ------------------------------------------------------------------ REPAIR (Claude, or one local syntax retry)
-TRACE_PATH = re.compile(r"([A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|mjs))")
+TRACE_PATH = re.compile(r"([A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|mjs|cjs))")
+
+
+def mentioned_files(repo: pathlib.Path, log: str) -> list[str]:
+    """Repo-relative source files named in a traceback or lint report. Jest, ESLint and pytest often print
+    absolute paths (/workspace/src/x.js); those are mapped back, and anything outside the repo is dropped."""
+    out = set()
+    for m in TRACE_PATH.findall(log or ""):
+        for prefix in (f"{repo}/", "/workspace/"):
+            if m.startswith(prefix):
+                m = m[len(prefix):]
+        m = m.removeprefix("./")
+        if m.startswith(("/", "node_modules/", ".factory/", ".git/")):
+            continue
+        try:
+            patches.validate_repo_path(m)
+        except PatchRejected:
+            continue
+        if (repo / m).is_file():
+            out.add(m)
+    return sorted(out)
 
 
 def repair(state, deps):
     repo = deps.repo_path(state)
     tier, role = prompts.next_repair_role(state)
     sb = state.get("sandbox")
-    mentioned = {m for m in TRACE_PATH.findall(sb.stack_excerpt if sb else "") if (repo / m).is_file()}
-    files = list(dict.fromkeys([*state["plan"].target_files, *sorted(mentioned)]))[:12]
+    mentioned = mentioned_files(repo, sb.stack_excerpt if sb else "")
+    files = list(dict.fromkeys([*state["plan"].target_files, *mentioned]))[:12]
     patches.reset_to_base(repo, state["base_sha"])          # sources shown to the model = original base
     kind = TaskKind.SECURITY_FIX if role == "security_fix" else TaskKind.REPAIR
     gw = deps.gateway_for(state)
