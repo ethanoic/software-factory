@@ -99,9 +99,14 @@ def guarded(fn, deps, *, node_name: str):
     """Wrap a node: trace span, breaker checks, and conversion of known failures into state."""
     from factory.obs import node_span
 
+    from factory.board_state import record_run
+
     @functools.wraps(fn)
     def wrapper(state):
         breaker = deps.breaker_for(state["run_id"])
+        dsn = getattr(deps, "dsn", None)
+        record_run(dsn, state["run_id"], status="running", stage=node_name,
+                   repair_attempts=state.get("repair_attempts", 0))
         with node_span(state, node_name) as span:
             try:
                 breaker.check_wall_clock()
@@ -120,5 +125,7 @@ def guarded(fn, deps, *, node_name: str):
                                                  failure_class=FailureClass.SYNTAX,
                                                  stack_excerpt=str(e)[:8000])}
             span.update(output={k: str(v)[:500] for k, v in update.items() if k != "patch"})
+            if update.get("model_pins"):
+                record_run(dsn, state["run_id"], models=update["model_pins"])
             return {**update, "patch_rejected": False}
     return wrapper

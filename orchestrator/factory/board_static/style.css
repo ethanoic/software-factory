@@ -1,0 +1,197 @@
+/* Factory board. Shop-floor signage: concrete floor, graphite ink, and colour only where it means
+   something: safety yellow = your move, signal red = stopped, line blue = moving, green = finished. */
+
+@font-face { font-family: "Barlow"; font-weight: 400; font-display: swap; src: url("fonts/barlow-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Barlow"; font-weight: 500; font-display: swap; src: url("fonts/barlow-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Barlow"; font-weight: 600; font-display: swap; src: url("fonts/barlow-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Barlow Condensed"; font-weight: 500; font-display: swap; src: url("fonts/barlow-condensed-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Barlow Condensed"; font-weight: 600; font-display: swap; src: url("fonts/barlow-condensed-latin-600-normal.woff2") format("woff2"); }
+
+:root {
+  --floor: #e9edf0;
+  --panel: #f8fafb;
+  --ink: #1b2631;
+  --steel: #5b6b7a;
+  --rule: #c7d0d8;
+  --track: #9aa8b5;
+  --yellow: #f3c21b;
+  --yellow-ink: #1b2631;
+  --red: #b5351e;
+  --blue: #2d5c8c;
+  --green: #3f7a57;
+  --code: #e1e7ec;
+  --focus: #2d5c8c;
+  --sans: "Barlow", "Helvetica Neue", Arial, sans-serif;
+  --narrow: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --floor: #131a21;
+    --panel: #1b242d;
+    --ink: #e2e8ed;
+    --steel: #93a2b0;
+    --rule: #2d3944;
+    --track: #4a5866;
+    --red: #e0634a;
+    --blue: #74a3d4;
+    --green: #74b58d;
+    --code: #121920;
+    --focus: #74a3d4;
+  }
+}
+
+* { box-sizing: border-box; }
+html { font-size: 100%; }
+body {
+  margin: 0;
+  background: var(--floor);
+  color: var(--ink);
+  font: 400 1rem/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "calt" 0, "liga" 0;   /* keep -- and flags literal: no em-dash substitution */
+}
+a { color: inherit; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+/* --- header ---------------------------------------------------------------------------------- */
+.top {
+  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .5rem 2rem;
+  padding: 1.25rem clamp(1rem, 4vw, 3rem) .75rem;
+  border-bottom: 2px solid var(--ink);
+}
+h1 { margin: 0; font: 600 2rem/1.1 var(--narrow); letter-spacing: .01em; }
+.vitals { display: flex; flex-wrap: wrap; gap: .25rem 1.5rem; color: var(--steel); font-size: .9375rem; }
+.vitals .state { display: inline-flex; align-items: center; gap: .45rem; color: var(--ink); font-weight: 500; }
+.vitals .dot { width: .6rem; height: .6rem; border-radius: 50%; background: var(--green); }
+.vitals .state.down .dot { background: var(--red); }
+
+.notice { margin: 0; padding: .6rem clamp(1rem, 4vw, 3rem); background: var(--red); color: #fff; font-weight: 500; }
+
+main { padding: 0 clamp(1rem, 4vw, 3rem) 2rem; }
+h2 { margin: 2rem 0 .75rem; font: 600 1.5rem/1.2 var(--narrow); }
+.count { color: var(--steel); font-weight: 500; }
+.hint { margin: -.4rem 0 1rem; color: var(--steel); font-size: .9375rem; max-width: 60ch; }
+
+/* --- your move ------------------------------------------------------------------------------- */
+.move-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .75rem; max-width: 62rem; }
+.move {
+  position: relative;
+  background: var(--panel);
+  padding: 1rem 1.25rem 1rem 1.75rem;
+  border: 1px solid var(--rule);
+}
+.move::before {                                   /* the sign's edge: yellow = yours, red = stopped */
+  content: ""; position: absolute; inset: -1px auto -1px -1px; width: .5rem; background: var(--yellow);
+}
+.move.stopped::before {
+  background: repeating-linear-gradient(-45deg, var(--red) 0 .45rem, var(--panel) .45rem .7rem);
+}
+.move h3 { margin: 0; font: 600 1.25rem/1.25 var(--narrow); }
+.move .why { margin: .2rem 0 0; max-width: 70ch; }
+.move .reason { margin: .35rem 0 0; color: var(--steel); font-size: .875rem; max-width: 70ch; overflow-wrap: anywhere; }
+.move .subject { margin: .1rem 0 0; color: var(--steel); font-size: .9375rem; max-width: 70ch; }
+.steps { margin: .75rem 0 0; padding-left: 1.25rem; display: grid; gap: .5rem; max-width: 70ch; }
+.steps li::marker { font-family: var(--narrow); font-weight: 600; color: var(--steel); }
+.steps .go {
+  display: inline-block; margin-left: .35rem; padding: .05rem .55rem;
+  background: var(--ink); color: var(--panel); text-decoration: none; font-weight: 500; font-size: .9375rem;
+}
+.move:not(.stopped) .steps .go { background: var(--yellow); color: var(--yellow-ink); }
+.steps .go:hover { text-decoration: underline; }
+.cmd { display: flex; align-items: stretch; margin-top: .3rem; max-width: 100%; }
+.cmd code {
+  flex: 1; min-width: 0; overflow-x: auto; white-space: pre;
+  padding: .35rem .6rem; background: var(--code); font: 500 .875rem/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+}
+.cmd button {
+  border: 0; padding: 0 .8rem; background: var(--ink); color: var(--panel);
+  font: 500 .875rem var(--sans); cursor: pointer;
+}
+.empty-moves { padding: 1rem 1.25rem; background: var(--panel); border: 1px solid var(--rule); max-width: 62rem; }
+.empty-moves strong { font: 600 1.125rem var(--narrow); display: block; }
+.empty-moves span { color: var(--steel); }
+
+/* --- the line -------------------------------------------------------------------------------- */
+.line {
+  display: grid;
+  grid-template-columns: repeat(10, minmax(8.5rem, 1fr));
+  overflow-x: auto;
+  padding-bottom: .5rem;
+}
+.station { position: relative; padding: 0 .4rem; }
+.station-head { position: relative; padding-top: 1.6rem; margin-bottom: .6rem; }
+.station-head::before {                           /* the conveyor: one continuous track through every station */
+  content: ""; position: absolute; top: .55rem; left: -.4rem; right: -.4rem; height: .3rem; background: var(--track);
+}
+.station:first-child .station-head::before { left: 50%; }
+.station:last-child .station-head::before { right: 50%; }
+.station-head::after {                            /* the station post */
+  content: ""; position: absolute; top: .2rem; left: calc(50% - .5rem);
+  width: 1rem; height: 1rem; border-radius: 50%; background: var(--floor); border: .2rem solid var(--track);
+}
+.station.has-work .station-head::after { border-color: var(--blue); background: var(--blue); }
+.station.has-yours .station-head::after { border-color: var(--ink); background: var(--yellow); }
+.station.has-stop .station-head::after { border-color: var(--red); background: var(--red); }
+.station-name { display: block; text-align: center; font: 600 1rem/1.2 var(--narrow); }
+.station-count { display: block; text-align: center; color: var(--steel); font-size: .8125rem; min-height: 1.2em; }
+.tags { list-style: none; margin: 0; padding: 0; display: grid; gap: .45rem; }
+
+.tag {
+  background: var(--panel); border: 1px solid var(--rule); border-top: .25rem solid var(--blue);
+  padding: .45rem .55rem .5rem; font-size: .875rem; line-height: 1.35;
+}
+.tag.paused { border-top-color: var(--steel); border-top-style: dashed; }
+.tag.stopped { border-top-color: var(--red); }
+.tag.yours { border-top-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, var(--panel)); }
+.tag.queued { border-top-color: var(--track); }
+.tag .ref { display: block; font: 600 .9375rem/1.2 var(--narrow); overflow-wrap: anywhere; }
+.tag .title {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  margin-top: .1rem;
+}
+.tag .state { display: block; margin-top: .3rem; color: var(--steel); font-size: .8125rem; }
+.tag.stopped .state { color: var(--red); font-weight: 500; }
+.tag.yours .state { color: var(--ink); font-weight: 500; }
+.tag .links { display: flex; flex-wrap: wrap; gap: .1rem .7rem; margin-top: .3rem; font-size: .8125rem; }
+
+/* one deliberate motion: the station where work is happening breathes */
+@media (prefers-reduced-motion: no-preference) {
+  .station.has-work:not(.has-stop):not(.has-yours) .station-head::after { animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes breathe {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--blue) 45%, transparent); }
+    50% { box-shadow: 0 0 0 .45rem color-mix(in srgb, var(--blue) 0%, transparent); }
+  }
+}
+
+/* --- finished -------------------------------------------------------------------------------- */
+.finished-list { list-style: none; margin: 0; padding: 0; max-width: 62rem; border-top: 1px solid var(--rule); }
+.finished-list li {
+  display: grid; grid-template-columns: minmax(9rem, 14rem) 1fr auto; gap: .25rem 1rem;
+  padding: .5rem 0; border-bottom: 1px solid var(--rule); font-size: .9375rem;
+}
+.finished-list .ref { font: 600 1rem var(--narrow); overflow-wrap: anywhere; }
+.finished-list .outcome { color: var(--steel); }
+.finished-list .outcome.merged { color: var(--green); font-weight: 500; }
+.finished-list .when { color: var(--steel); white-space: nowrap; }
+.finished-list .none { display: block; color: var(--steel); }
+
+.foot {
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: .25rem 1rem;
+  padding: 1rem clamp(1rem, 4vw, 3rem) 1.5rem; color: var(--steel); font-size: .8125rem;
+  border-top: 1px solid var(--rule);
+}
+
+/* --- narrow screens: the line turns vertical ---------------------------------------------------- */
+@media (max-width: 720px) {
+  .line { grid-template-columns: 1fr; overflow: visible; }
+  .station { display: grid; grid-template-columns: 6.5rem 1fr; gap: .75rem; padding: 0 0 .9rem; }
+  .station-head { padding: 0 0 0 1.6rem; margin: 0; }
+  .station-head::before { top: -.2rem; bottom: -1.1rem; left: .4rem; right: auto; width: .3rem; height: auto; }
+  .station:first-child .station-head::before { top: .5rem; left: .4rem; }
+  .station:last-child .station-head::before { bottom: auto; height: .6rem; right: auto; }
+  .station-head::after { top: .2rem; left: .05rem; }
+  .station-name, .station-count { text-align: left; }
+  .finished-list li { grid-template-columns: 1fr auto; }
+  .finished-list .title { grid-column: 1 / -1; }
+}

@@ -103,6 +103,16 @@ make logs
 Look for `GitHub intake: ethanoic/factory-hello-node`. On its first poll the factory creates its labels on the
 repository (`factory:ready`, `factory:approve` and the status labels), so they appear under Issues → Labels.
 
+Then open the board, and keep it open for the rest of the walkthrough:
+
+```bash
+make board        # http://localhost:8090
+```
+
+**Your move** at the top lists what is waiting on you, with the link or command for each step. **The line**
+below it shows where every ticket is. If the factory is not running or no model is approved, the first item
+says so and gives the command.
+
 ## 7. Create the issues
 
 The repository has an issue form: **Issues → New issue → Factory task**. It asks for the change and concrete
@@ -161,6 +171,8 @@ the factory takes at most 4 runs a day. Label B and C once A has finished.
 The label only counts when someone with write access applies it. You own the repository, so yours does.
 
 ## 8. What happens next
+
+The board shows each of these steps as it happens; the issue labels show the same thing on GitHub.
 
 | When | On the issue | What it means |
 | --- | --- | --- |

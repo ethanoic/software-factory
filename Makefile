@@ -1,12 +1,15 @@
 # AI Software Factory — run from the folder that also holds your existing compose.yml.
-COMPOSE = docker compose -f compose.yml -f compose.factory.yml
+# Both env files feed ${VAR} substitution in the compose files (.env.factory holds the factory's passwords;
+# compose reads only .env by default, which left FACTORY_DB_PASSWORD empty).
+ENV_FILES = $(if $(wildcard .env),--env-file .env) $(if $(wildcard .env.factory),--env-file .env.factory)
+COMPOSE = docker compose $(ENV_FILES) -f compose.yml -f compose.factory.yml
 # DEPS: path to a target repo, for building its runner image
 DEPS ?=
 # OMLX_MODELS: where your omlx server keeps MLX model folders
 OMLX_MODELS ?= $(HOME)/models/mlx
 PY ?= python3
 
-.PHONY: help init lock db hoststat runner-py runner-ts up down logs test check status approve pool claude-token claude-token-paste claude-token-check
+.PHONY: help init lock db hoststat runner-py runner-ts up down logs test check status approve pool claude-token claude-token-paste claude-token-check board db-board
 
 help:
 	@echo "init      create folders, secrets placeholder, .env.factory"
@@ -20,6 +23,8 @@ help:
 	@echo "pool ARGS=...          model pool: refresh, catalog, list, trust, promote, once"
 	@echo "claude-token           get a Claude plan token with your current login (claude setup-token)"
 	@echo "claude-token-check     show the stored token's expiry and test it from the factory"
+	@echo "board                  open the factory board (what is where, and what needs you)"
+	@echo "db-board               create the board's read-only database role (once)"
 
 init:
 	mkdir -p workspace/inbox workspace/runs hoststat secrets qualification/code qualification/triage
@@ -61,10 +66,10 @@ runner-ts:
 	docker build -t factory-runner-ts:locked build/runner-ts
 
 up:
-	$(COMPOSE) up -d --build orchestrator pool-worker sandbox-broker egress-proxy
+	$(COMPOSE) up -d --build orchestrator pool-worker sandbox-broker egress-proxy board
 
 down:
-	$(COMPOSE) stop orchestrator pool-worker sandbox-broker egress-proxy
+	$(COMPOSE) stop orchestrator pool-worker sandbox-broker egress-proxy board
 
 logs:
 	$(COMPOSE) logs -f orchestrator pool-worker sandbox-broker
@@ -87,6 +92,14 @@ claude-token-check:
 _restart-if-running:
 	@if [ -n "$$($(COMPOSE) ps -q orchestrator 2>/dev/null)" ]; then \
 	  echo "restarting the factory to load the new token"; $(COMPOSE) restart orchestrator pool-worker; fi
+
+board:
+	@url=http://localhost:8090; (command -v open >/dev/null && open $$url) || echo "Open $$url"
+
+db-board:
+	@. ./.env.factory; test -n "$$FACTORY_BOARD_DB_PASSWORD" || (echo "set FACTORY_BOARD_DB_PASSWORD in .env.factory first" && exit 1); \
+	$(COMPOSE) exec -T -e PW="$$FACTORY_BOARD_DB_PASSWORD" postgres \
+	  sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d postgres -v pw="$$PW"' < orchestrator/sql/board_role.sql
 
 pool:
 	@test -n "$(ARGS)" || (echo 'usage: make pool ARGS="refresh | catalog | list | trust <model> [roles] | promote <model> <role> | once"' && exit 1)

@@ -205,7 +205,25 @@ class Intake:
                 self._set_label(repo, n, "queued")
                 queued.append(t)
                 print(f"[github] queued {repo}#{n} (labelled by @{who})", flush=True)
+        self.sync_closed()
         return queued
+
+    def sync_closed(self) -> int:
+        """Mark runs finished once their issue closes (normally: you merged the PR, which says Closes #n)."""
+        from factory.board_state import record_run
+        with psycopg.connect(self.dsn) as c:
+            rows = c.execute("SELECT repo, number, run_id FROM github_issues WHERE status = 'pr_open'").fetchall()
+        closed = 0
+        for repo, n, run_id in rows:
+            try:
+                issue, _ = self.gh.get(f"/repos/{repo}/issues/{n}", conditional=True)
+            except httpx.HTTPError:
+                continue
+            if issue.get("state") == "closed":
+                self._record(repo, n, "closed")
+                record_run(self.dsn, run_id, status="done")
+                closed += 1
+        return closed
 
     def approvals(self) -> list[str]:
         """Run ids whose issue got the approve label from an authorized user."""

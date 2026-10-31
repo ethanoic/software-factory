@@ -89,6 +89,23 @@ services:
     mem_limit: 64m
     restart: unless-stopped
 
+  board:                           # the factory board: http://localhost:8090 (read-only, see README)
+    <<: *hardened
+    build: ./orchestrator
+    command: ["factory.board", "serve"]
+    networks: [data, default]      # default only so the port can be published; the board calls nothing out
+    ports: ["127.0.0.1:8090:8090"] # this Mac only, never the LAN
+    environment:
+      BOARD_DB_DSN: postgresql://factory_board:${FACTORY_BOARD_DB_PASSWORD}@postgres:5432/factory
+      WORKSPACE_ROOT: /workspace
+      LANGFUSE_PUBLIC_URL: http://localhost:3000
+      FACTORY_DOCS_URL: https://github.com/ethanoic/software-factory/blob/main
+      FACTORY_TZ: Asia/Singapore
+    volumes:
+      - ./workspace/inbox:/workspace/inbox:ro
+    mem_limit: 128m
+    restart: unless-stopped
+
   # Existing services: attach them to the factory's internal data network.
   postgres:
     networks: [data, default]
