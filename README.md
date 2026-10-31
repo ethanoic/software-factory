@@ -34,7 +34,7 @@ the sample Node.js app in `examples/hello-node` from a GitHub issue to a merged 
 | --- | --- |
 | D1 | LangGraph + Postgres checkpointer; human approval before every PR; PRs open as drafts on `factory/<ticket>` |
 | D2 | Coding roles use Anthropic models only; which Claude model is chosen by your qualification suite, never hardcoded |
-| D3 | Claude Pro via the Claude Agent SDK, signed in with the plan (`CLAUDE_CODE_OAUTH_TOKEN`), tools disabled |
+| D3 | Claude Pro via the Claude Agent SDK, signed in with a plan token from `make claude-token` (Docker secret), tools disabled |
 | D4 | `local_mode: assist`: a 4–8B MLX model via omlx triages tickets; 10 GB resident cap |
 | D5 | OpenRouter catalog for discovery and list prices only; no code goes through an aggregator; no LiteLLM |
 | D6 | Model evals ≤ US$70/month billed (≈ SGD 90); Claude evals on Pro cost $0 but use plan limits |
@@ -45,7 +45,7 @@ the sample Node.js app in `examples/hello-node` from a GitHub issue to a merged 
 
 **Upgrade trigger (D3/D4):** if runs park on Pro limits more than twice a week, or the factory blocks
 your own coding, move to Max 5x, claim its US$100/month API credit into a Console organization, set
-`anthropic_route: api_key` and `ANTHROPIC_API_KEY`, and remove `CLAUDE_CODE_OAUTH_TOKEN`.
+`anthropic_route: api_key` and `ANTHROPIC_API_KEY`, and empty `secrets/claude_oauth_token`.
 
 ## Setup (Phase 0)
 
@@ -55,9 +55,9 @@ repo's files next to it.
 1. **Docker Desktop**: Settings → Resources → Memory 10 GB, swap 1 GB, CPUs 6. File sharing: remove
    `/Users`, add only this folder (rule R1). Turn on Enhanced Container Isolation if your plan has it.
 2. `make init` — creates `workspace/`, `secrets/`, `.env.factory` (chmod 600).
-3. **Claude Pro token**: run `claude setup-token` on the Mac and paste it as `CLAUDE_CODE_OAUTH_TOKEN`
-   in `.env.factory`. Keep `ANTHROPIC_API_KEY` unset. The token is full access to your plan: never
-   commit or share it. Individual use on your own machine only.
+3. **Claude Pro token**: `make claude-token` (see "Claude plan token" below). It uses your current
+   claude.ai login and stores a one-year token in `secrets/claude_oauth_token`. Keep `ANTHROPIC_API_KEY`
+   and `ANTHROPIC_AUTH_TOKEN` unset.
 4. **GitHub**: create a fine-grained token limited to the repos in `github.yaml`, with *Contents*,
    *Pull requests* and *Issues*: read/write, and *Metadata*: read. Save it to `secrets/github_token`.
    Protect `main` (rule R9). Then list your repos in `github.yaml` (see "GitHub intake" below).
@@ -72,6 +72,30 @@ repo's files next to it.
 10. `make runner-py DEPS=/path/to/target-repo` (or `runner-ts`) — bakes the target repo's dependencies
     into the runner image, because the runner has no network.
 11. `make up`, then `make logs`.
+
+## Claude plan token
+
+The factory reaches Claude with a long-lived token tied to your Pro plan, made by Claude Code's own
+[`claude setup-token`](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token).
+
+```bash
+make claude-token          # opens claude.ai in your browser; click Authorize; the token is captured
+make claude-token-check    # shows its expiry, then makes one tiny call from inside the factory
+```
+
+- **Uses your current login.** If your browser is already signed in to claude.ai, you only approve
+  access. You need Claude Code installed on the Mac (`claude --version`).
+- **Separate from your own sessions.** It mints a new token for scripts and leaves your interactive
+  Claude Code login alone. The factory deliberately does not copy the login Claude Code keeps in your
+  macOS Keychain: that would share and refresh one session between two programs, and it is not a
+  documented interface.
+- **Stored as a Docker secret.** `secrets/claude_oauth_token` (mode 600), passed only to the Claude Code
+  process inside the container, never to the whole container's environment. The script never prints
+  it, and blanks any old copy in `.env.factory`.
+- **Lasts one year.** The factory alerts daily from 30 days before expiry; renew with
+  `make claude-token`. `make claude-token-paste` stores a token you already have.
+- **Treat it like a password.** It can make model requests on your plan. Individual use on your own
+  machine only.
 
 ## Qualify before the first ticket
 
@@ -159,7 +183,7 @@ These need the running stack and are checked by hand in Phase 1:
 
 ## What has been tested, and what has not
 
-Tested in this build (`make test`, 64 tests; set `FACTORY_TEST_DSN` to include the 20 Postgres ones):
+Tested in this build (`make test`, 76 tests; set `FACTORY_TEST_DSN` to include the 20 Postgres ones):
 routing for all three `local_mode`s, diff validation and forbidden paths, every FSM router, the real
 LangGraph wiring with stubbed nodes (repair loop, 3-repair cap, human gate, tamper halt), the breaker
 against real Postgres (run cap, daily cap, persistent trip), pool selection and catalog refresh,
@@ -171,7 +195,10 @@ Manual trust, promotion and the `pool_worker` commands were run against Postgres
 was run end to end through the real factory steps on a Python sample (wrong patch → repair → green →
 dry-run PR → tamper detected) and on `examples/hello-node` with the Node runner's exact tooling (wrong
 logic → assertion; unused variable → lint repair; `eval` → blocking security finding; clean fix → dry-run
-PR; no ESLint config → lint skipped; Jest missing → halt, not a paid repair).
+PR; no ESLint config → lint skipped; Jest missing → halt, not a paid repair). `scripts/claude-token.sh`
+was run against a fake `claude` CLI that prints setup-token's real output style, through both the Linux
+and a BSD-syntax `script(1)`: capture, masking, file mode, in-place rewrite, paste fallback, failed
+sign-in and expiry reporting. A real `claude setup-token` sign-in has not been run.
 
 Not yet exercised (Phase 0–1 on your Mac): Docker builds and the broker's container isolation, the
 egress proxy, real Claude/omlx calls, Langfuse ingestion, and the real GitHub API (push, PR creation,

@@ -6,7 +6,7 @@ DEPS ?=
 OMLX_MODELS ?= $(HOME)/models/mlx
 PY ?= python3
 
-.PHONY: help init lock db hoststat runner-py runner-ts up down logs test check status approve pool
+.PHONY: help init lock db hoststat runner-py runner-ts up down logs test check status approve pool claude-token claude-token-paste claude-token-check
 
 help:
 	@echo "init      create folders, secrets placeholder, .env.factory"
@@ -18,11 +18,14 @@ help:
 	@echo "up / down / logs       start, stop, follow the factory"
 	@echo "test      run the factory's own unit tests (no services needed)"
 	@echo "pool ARGS=...          model pool: refresh, catalog, list, trust, promote, once"
+	@echo "claude-token           get a Claude plan token with your current login (claude setup-token)"
+	@echo "claude-token-check     show the stored token's expiry and test it from the factory"
 
 init:
 	mkdir -p workspace/inbox workspace/runs hoststat secrets qualification/code qualification/triage
 	@[ -f .env.factory ] || (cp .env.factory.example .env.factory && chmod 600 .env.factory && echo "created .env.factory")
 	@[ -f secrets/github_token ] || (touch secrets/github_token && chmod 600 secrets/github_token && echo "put a fine-grained GitHub token in secrets/github_token")
+	@[ -f secrets/claude_oauth_token ] || (touch secrets/claude_oauth_token && chmod 600 secrets/claude_oauth_token && echo "run make claude-token to store your Claude plan token")
 
 lock:
 	cd orchestrator && uv pip compile requirements.in --generate-hashes --python-version 3.12 \
@@ -68,6 +71,22 @@ logs:
 
 status:
 	$(COMPOSE) exec orchestrator python -m factory.runner status
+
+claude-token:
+	scripts/claude-token.sh new
+	@$(MAKE) --no-print-directory _restart-if-running
+
+claude-token-paste:
+	scripts/claude-token.sh paste
+	@$(MAKE) --no-print-directory _restart-if-running
+
+claude-token-check:
+	scripts/claude-token.sh status
+	$(COMPOSE) exec orchestrator python -m factory.claude_token check
+
+_restart-if-running:
+	@if [ -n "$$($(COMPOSE) ps -q orchestrator 2>/dev/null)" ]; then \
+	  echo "restarting the factory to load the new token"; $(COMPOSE) restart orchestrator pool-worker; fi
 
 pool:
 	@test -n "$(ARGS)" || (echo 'usage: make pool ARGS="refresh | catalog | list | trust <model> [roles] | promote <model> <role> | once"' && exit 1)
