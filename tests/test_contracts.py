@@ -105,6 +105,8 @@ def test_subscription_adapter_contract(monkeypatch):
     for name, val in (("query", fake_query), ("AssistantMessage", Assistant), ("ResultMessage", Result), ("TextBlock", Text)):
         monkeypatch.setattr(sdk, name, val)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("SECRETS_DIR", "/nonexistent-secrets")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-token")
 
     a = SubscriptionAdapter()
@@ -114,6 +116,7 @@ def test_subscription_adapter_contract(monkeypatch):
                                   messages=[{"role": "system", "content": "S"}, {"role": "user", "content": "U"}])
     o = seen["options"]
     assert o.tools == [] and o.max_turns == 1 and o.setting_sources == [] and "Bash" in o.disallowed_tools
+    assert o.env == {"CLAUDE_CODE_OAUTH_TOKEN": "test-token"}     # only to the Claude Code subprocess
     assert o.system_prompt == "S" and seen["prompt"] == "U"
     assert r.choices[0].message.content.startswith("```diff")
     assert (r.usage.prompt_tokens, r.usage.completion_tokens) == (150, 20)
@@ -124,6 +127,10 @@ def test_subscription_adapter_contract(monkeypatch):
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-be-set")
     with pytest.raises(SystemExit):
+        SubscriptionAdapter()
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "gateway-token")       # also outranks the plan token
+    with pytest.raises(SystemExit, match="ANTHROPIC_AUTH_TOKEN"):
         SubscriptionAdapter()
 
 

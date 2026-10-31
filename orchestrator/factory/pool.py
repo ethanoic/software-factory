@@ -138,10 +138,17 @@ class SubscriptionAdapter:
                 "LS", "WebFetch", "WebSearch", "Task", "NotebookEdit", "TodoWrite"]
 
     def __init__(self):
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            raise SystemExit("ANTHROPIC_API_KEY is set; it would take precedence over the plan login")
-        if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-            raise SystemExit("CLAUDE_CODE_OAUTH_TOKEN missing: run `claude setup-token` on the Mac")
+        from factory.config import claude_oauth_token
+        # Claude Code ranks both of these above CLAUDE_CODE_OAUTH_TOKEN, so either one would silently
+        # switch the factory from your plan to API billing (or to a gateway).
+        for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            if os.environ.get(var):
+                raise SystemExit(f"{var} is set; it would take precedence over the Claude plan token")
+        token, _ = claude_oauth_token()
+        if not token:
+            raise SystemExit("No Claude plan token: on the Mac, run `make claude-token`")
+        # Passed only to the Claude Code subprocess, not exported to the whole container.
+        self._env = {"CLAUDE_CODE_OAUTH_TOKEN": token}
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
         self.models = SimpleNamespace(list=lambda: [])    # no list endpoint; qualification probes instead
 
@@ -155,7 +162,7 @@ class SubscriptionAdapter:
         opts = ClaudeAgentOptions(model=model, system_prompt=system, max_turns=1,
                                   tools=[],                              # disable every built-in tool
                                   allowed_tools=[], disallowed_tools=self.NO_TOOLS,   # belt and braces
-                                  setting_sources=[], cwd=tempfile.mkdtemp(prefix="sdk-"))
+                                  setting_sources=[], cwd=tempfile.mkdtemp(prefix="sdk-"), env=self._env)
         text, result = [], None
         async for msg in query(prompt=prompt, options=opts):
             if isinstance(msg, AssistantMessage):

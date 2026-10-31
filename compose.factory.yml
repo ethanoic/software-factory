@@ -40,8 +40,8 @@ services:
     command: ["factory.runner", "serve"]
     networks: [control, data]
     environment: *orch_env
-    env_file: [.env.factory]       # CLAUDE_CODE_OAUTH_TOKEN, LANGFUSE_*_KEY, ALERT_WEBHOOK_URL, optional keys
-    secrets: [github_token]
+    env_file: [.env.factory]       # LANGFUSE_*_KEY, ALERT_WEBHOOK_URL, optional keys (Claude token: secrets/)
+    secrets: [github_token, claude_oauth_token]
     volumes:
       - ./workspace:/workspace:rw
       - ./hoststat:/hoststat:ro
@@ -59,7 +59,7 @@ services:
     networks: [control, data]
     environment: *orch_env
     env_file: [.env.factory]
-    secrets: [github_token]
+    secrets: [github_token, claude_oauth_token]
     volumes:
       - ./workspace:/workspace:rw
       - ./hoststat:/hoststat:ro
@@ -98,3 +98,5 @@ services:
 secrets:
   github_token:
     file: ./secrets/github_token
+  claude_oauth_token:              # written by `make claude-token` (scripts/claude-token.sh)
+    file: ./secrets/claude_oauth_token

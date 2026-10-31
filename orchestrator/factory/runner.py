@@ -20,7 +20,7 @@ import uuid
 import psycopg
 
 from factory.breaker import alert
-from factory.config import policy
+from factory.config import claude_token_warning, policy
 from factory.deps import Deps
 from factory.graph import compile_app, config_for
 from factory.pool import QuotaExhausted
@@ -113,7 +113,13 @@ def serve(deps: Deps) -> None:
         saver.setup()
         repos = ", ".join(r["repo"] for r in intake.cfg["repos"]) if intake else "none (inbox only)"
         print(f"[serve] watching {inbox}; GitHub intake: {repos}", flush=True)
+        last_token_check = 0.0
         while True:
+            if time.time() - last_token_check >= 86_400:      # daily: missing or expiring Claude token
+                last_token_check = time.time()
+                warning = claude_token_warning()
+                if warning:
+                    alert("claude-token", "factory", warning)
             if intake and intake.due():
                 intake.poll()
                 for run_id in intake.approvals():

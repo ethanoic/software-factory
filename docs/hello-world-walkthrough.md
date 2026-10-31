@@ -6,7 +6,7 @@ factory at it, approve a Claude model, and file three issues: two the factory sh
 should refuse.
 
 **Before you start:** finish [README → Setup (Phase 0)](../README.md#setup-phase-0) steps 1–9: Docker
-limits, `.env.factory` with your Claude token, Langfuse keys, the factory database and the lockfiles. Commands
+limits, your Claude token (`make claude-token`), Langfuse keys, the factory database and the lockfiles. Commands
 below run from the factory folder unless they say otherwise.
 
 ## 1. Put the example in its own repository
