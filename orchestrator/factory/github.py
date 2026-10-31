@@ -29,7 +29,28 @@ STATUS_LABELS = {
     "awaiting_approval": "factory:awaiting-approval", "pr_open": "factory:pr-open",
     "halted": "factory:halted", "rejected": "factory:rejected", "parked": "factory:parked",
 }
-LABEL_COLORS = {"factory:ready": "0e8a16", "factory:approve": "5319e7"}
+# Colours match the board: strong for the labels people add, yellow when it is your move,
+# red when stopped, grey for status the factory manages.
+GREEN, PURPLE, YELLOW, RED, GREY = "1f883d", "8250df", "fbca04", "d73a4a", "d0d7de"
+
+
+def label_specs(cfg: dict) -> dict[str, tuple[str, str]]:
+    """name -> (colour, description). GitHub shows the description under each label in the label picker,
+    so this is where whoever triages issues learns what to add. Descriptions are capped at 100 chars."""
+    ready, approve = cfg["trigger_label"], cfg["approve_label"]
+    by_factory = "Set by the factory, don't change by hand:"
+    specs = {
+        ready: (GREEN, "Add this to have the AI factory work on the issue. Needs write access."),
+        approve: (PURPLE, "Add this to open the draft PR after the factory's tests pass. Needs write access."),
+        STATUS_LABELS["queued"]: (GREY, f"{by_factory} waiting for a free slot."),
+        STATUS_LABELS["running"]: (GREY, f"{by_factory} working on it now."),
+        STATUS_LABELS["parked"]: (GREY, f"{by_factory} paused on the Claude limit. Resumes on its own."),
+        STATUS_LABELS["awaiting_approval"]: (YELLOW, f"Tests passed. Add {approve} to open the draft PR."),
+        STATUS_LABELS["pr_open"]: (YELLOW, "Draft PR open. Review and merge it; merging closes the issue."),
+        STATUS_LABELS["halted"]: (RED, f"Stopped. Read the factory's comment, then re-add {ready} to retry."),
+        STATUS_LABELS["rejected"]: (GREY, f"Not taken. Read the factory's comment; reword and re-add {ready} to retry."),
+    }
+    return {name: (colour, desc[:100]) for name, (colour, desc) in specs.items()}
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
@@ -123,11 +144,16 @@ class GitHub:
     def comment(self, repo: str, number: int, body: str) -> None:
         self.c.post(f"/repos/{repo}/issues/{number}/comments", json={"body": body}).raise_for_status()
 
-    def ensure_labels(self, repo: str, names: list[str]) -> None:
-        for n in names:
-            if self.c.get(f"/repos/{repo}/labels/{n}").status_code == 404:
-                self.c.post(f"/repos/{repo}/labels", json={"name": n, "color": LABEL_COLORS.get(n, "c5def5"),
-                                                            "description": "AI Software Factory"})
+    def ensure_labels(self, repo: str, specs: dict[str, tuple[str, str]]) -> None:
+        """Create missing labels, and bring existing ones up to date (colour and description)."""
+        for name, (colour, desc) in specs.items():
+            r = self.c.get(f"/repos/{repo}/labels/{name}")
+            if r.status_code == 404:
+                self.c.post(f"/repos/{repo}/labels", json={"name": name, "color": colour, "description": desc})
+            elif r.status_code == 200:
+                cur = r.json()
+                if (cur.get("color") or "").lower() != colour or (cur.get("description") or "") != desc:
+                    self.c.patch(f"/repos/{repo}/labels/{name}", json={"color": colour, "description": desc})
 
 
 class Intake:
@@ -174,7 +200,7 @@ class Intake:
             repo = r["repo"]
             try:
                 if repo not in self._labels_ready:
-                    self.gh.ensure_labels(repo, [trigger, self.cfg["approve_label"], *STATUS_LABELS.values()])
+                    self.gh.ensure_labels(repo, label_specs(self.cfg))
                     self._labels_ready.add(repo)
                 issues, changed = self.gh.get(f"/repos/{repo}/issues", {
                     "state": "open", "labels": trigger, "sort": "created", "direction": "asc", "per_page": 50},

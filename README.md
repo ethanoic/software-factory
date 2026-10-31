@@ -73,6 +73,8 @@ repo's files next to it.
 10. `make runner-py DEPS=/path/to/target-repo` (or `runner-ts`) — bakes the target repo's dependencies
     into the runner image, because the runner has no network.
 11. `make up`, then `make logs`.
+12. `make board` opens the factory board at http://localhost:8090. Keep it open: it lists what needs
+    you and where every ticket is (see "Factory board" below).
 
 ## Claude plan token
 
@@ -123,8 +125,23 @@ Code-suite qualification runs on your Pro limits. Run it in the evening, not whi
 ## GitHub intake
 
 Configure in `github.yaml`: the repos to watch (`owner/name`, base branch, language), the poll
-interval (default 120 s, minimum 60), the two labels, and who may apply them. The factory creates its
-labels on each repo the first time it polls.
+interval (default 120 s, minimum 60), the two labels, and who may apply them.
+
+**The labels explain themselves.** The factory creates its labels on each repo the first time it polls,
+and keeps their colours and descriptions up to date. GitHub shows each description under the label name
+in the label picker, so whoever triages issues sees what to add without reading this file:
+
+| Label | Colour | Description in GitHub |
+| --- | --- | --- |
+| `factory:ready` | green | Add this to have the AI factory work on the issue. Needs write access. |
+| `factory:approve` | purple | Add this to open the draft PR after the factory's tests pass. Needs write access. |
+| `factory:awaiting-approval` | yellow | Tests passed. Add factory:approve to open the draft PR. |
+| `factory:pr-open` | yellow | Draft PR open. Review and merge it; merging closes the issue. |
+| `factory:halted` | red | Stopped. Read the factory's comment, then re-add factory:ready to retry. |
+| `factory:queued`, `running`, `parked`, `rejected` | grey | Set by the factory, don't change by hand (`rejected` explains how to retry). |
+
+Green and purple are the only labels a person adds. Yellow means it's your move, the same colour as on
+the board.
 
 Idle polls are free: the factory sends the list's ETag and GitHub answers `304 Not Modified`, which
 does not count against the API rate limit.

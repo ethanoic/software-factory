@@ -102,6 +102,8 @@ make logs
 
 Look for `GitHub intake: ethanoic/factory-hello-node`. On its first poll the factory creates its labels on the
 repository (`factory:ready`, `factory:approve` and the status labels), so they appear under Issues → Labels.
+Each has a description saying what it does, which GitHub shows in the label picker: green and purple are
+the two you add; the rest are set by the factory.
 
 Then open the board, and keep it open for the rest of the walkthrough:
 
