@@ -34,6 +34,8 @@ class FakeGitHub:
         self.comments = []
         self.list_calls = {"200": 0, "304": 0}
         self.version = 0
+        self.repo_labels = {}       # name -> {"color", "description"}
+        self.label_writes = []      # ("create" | "update", name)
 
     def add_issue(self, n, title, body="", labelled_by=None, pr=False):
         self.issues[n] = {"title": title, "body": body, "labels": set(), "pr": pr}
@@ -60,8 +62,15 @@ class FakeGitHub:
                    for n, i in sorted(self.issues.items()) if want in i["labels"]]
             return httpx.Response(200, json=out, headers={"ETag": etag})
         parts = p.split("/")
-        if m == "GET" and p.startswith(f"/repos/{REPO}/labels/"):
-            return httpx.Response(200, json={})
+        if p.startswith(f"/repos/{REPO}/labels/"):
+            name = parts[-1]
+            if m == "GET":
+                lb = self.repo_labels.get(name)
+                return httpx.Response(200, json={"name": name, **lb}) if lb else httpx.Response(404)
+            if m == "PATCH":
+                self.repo_labels[name].update(json.loads(req.content))
+                self.label_writes.append(("update", name))
+                return httpx.Response(200, json={})
         if m == "GET" and p.endswith("/events"):
             return httpx.Response(200, json=self.events[int(parts[-2])])
         if m == "GET" and "/collaborators/" in p:
@@ -86,6 +95,9 @@ class FakeGitHub:
             self.comments.append((int(parts[-2]), json.loads(req.content)["body"]))
             return httpx.Response(201, json={})
         if m == "POST" and p == f"/repos/{REPO}/labels":
+            body = json.loads(req.content)
+            self.repo_labels[body["name"]] = {"color": body["color"], "description": body["description"]}
+            self.label_writes.append(("create", body["name"]))
             return httpx.Response(201, json={})
         return httpx.Response(500, json={"unexpected": f"{m} {p}"})
 
@@ -183,3 +195,30 @@ def test_github_outage_never_breaks_reporting(env):
     intake.gh = GitHub("x", transport=httpx.MockTransport(lambda r: httpx.Response(502)))
     intake.report(t, "run-5", "pr_open", "https://github.com/acme/shop/pull/1")   # must not raise
     assert intake.poll() == []
+
+
+@needs_db
+def test_labels_explain_themselves_in_the_github_label_picker(env):
+    """Whoever triages issues learns what to add from the label descriptions GitHub shows."""
+    from factory.github import label_specs
+    fake, intake, _ = env
+    fake.repo_labels["factory:ready"] = {"color": "0e8a16", "description": "AI Software Factory"}   # older build
+    fake.repo_labels["factory:running"] = dict(zip(("color", "description"),
+                                                   label_specs(intake.cfg)["factory:running"]))       # already right
+    intake.poll()
+    specs = label_specs(intake.cfg)
+    assert {n: (lb["color"], lb["description"]) for n, lb in fake.repo_labels.items()} == specs
+    assert ("update", "factory:ready") in fake.label_writes                                # old description fixed
+    assert not any(n == "factory:running" for _, n in fake.label_writes)                   # untouched when correct
+    assert specs["factory:ready"][1].startswith("Add this") and "write access" in specs["factory:ready"][1]
+    assert "Add factory:approve" in specs["factory:awaiting-approval"][1]
+    assert all(d.startswith("Set by the factory") for n, (_, d) in specs.items()
+               if n in ("factory:queued", "factory:running", "factory:parked"))
+    assert all(len(d) <= 100 for _, d in specs.values())
+
+
+def test_custom_label_names_flow_into_the_descriptions():
+    from factory.github import label_specs
+    specs = label_specs(validate({"repos": [{"repo": REPO}], "trigger_label": "ai:go", "approve_label": "ai:ship"}))
+    assert "ai:go" in specs and "ai:ship" in specs
+    assert "re-add ai:go" in specs["factory:halted"][1] and "Add ai:ship" in specs["factory:awaiting-approval"][1]

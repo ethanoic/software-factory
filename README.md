@@ -62,8 +62,9 @@ repo's files next to it.
    *Pull requests* and *Issues*: read/write, and *Metadata*: read. Save it to `secrets/github_token`.
    Protect `main` (rule R9). Then list your repos in `github.yaml` (see "GitHub intake" below).
 5. **Langfuse**: create a project, put its keys in `.env.factory`.
-6. **Postgres**: set `FACTORY_DB_PASSWORD` in `.env.factory`, then `make db`. If your services are not
-   named `postgres` and `langfuse-web`, rename them at the bottom of `compose.factory.yml`.
+6. **Postgres**: set `FACTORY_DB_PASSWORD` and `FACTORY_BOARD_DB_PASSWORD` in `.env.factory`, then
+   `make db`, then `make db-board` (the board's read-only role). If your services are not named
+   `postgres` and `langfuse-web`, rename them at the bottom of `compose.factory.yml`.
 7. **Local model**: install a 4–8B instruct model with an MLX 4-bit build into your omlx models folder
    (one folder per model, folder name = the alias omlx serves). Bind omlx to `127.0.0.1:8000`.
 8. `make hoststat OMLX_MODELS=/path/to/your/mlx/models` — installs the launchd memory sensor.
@@ -72,6 +73,8 @@ repo's files next to it.
 10. `make runner-py DEPS=/path/to/target-repo` (or `runner-ts`) — bakes the target repo's dependencies
     into the runner image, because the runner has no network.
 11. `make up`, then `make logs`.
+12. `make board` opens the factory board at http://localhost:8090. Keep it open: it lists what needs
+    you and where every ticket is (see "Factory board" below).
 
 ## Claude plan token
 
@@ -122,8 +125,23 @@ Code-suite qualification runs on your Pro limits. Run it in the evening, not whi
 ## GitHub intake
 
 Configure in `github.yaml`: the repos to watch (`owner/name`, base branch, language), the poll
-interval (default 120 s, minimum 60), the two labels, and who may apply them. The factory creates its
-labels on each repo the first time it polls.
+interval (default 120 s, minimum 60), the two labels, and who may apply them.
+
+**The labels explain themselves.** The factory creates its labels on each repo the first time it polls,
+and keeps their colours and descriptions up to date. GitHub shows each description under the label name
+in the label picker, so whoever triages issues sees what to add without reading this file:
+
+| Label | Colour | Description in GitHub |
+| --- | --- | --- |
+| `factory:ready` | green | Add this to have the AI factory work on the issue. Needs write access. |
+| `factory:approve` | purple | Add this to open the draft PR after the factory's tests pass. Needs write access. |
+| `factory:awaiting-approval` | yellow | Tests passed. Add factory:approve to open the draft PR. |
+| `factory:pr-open` | yellow | Draft PR open. Review and merge it; merging closes the issue. |
+| `factory:halted` | red | Stopped. Read the factory's comment, then re-add factory:ready to retry. |
+| `factory:queued`, `running`, `parked`, `rejected` | grey | Set by the factory, don't change by hand (`rejected` explains how to retry). |
+
+Green and purple are the only labels a person adds. Yellow means it's your move, the same colour as on
+the board.
 
 Idle polls are free: the factory sends the list's ETag and GitHub answers `304 Not Modified`, which
 does not count against the API rate limit.
@@ -145,8 +163,33 @@ and is ignored, so strangers filing issues cannot spend your Claude plan.
 
 Set `enabled: false` in `github.yaml` to run on the inbox folder only.
 
+## Factory board
+
+`make board` opens **http://localhost:8090**: where every ticket is, and what you need to do next.
+
+- **Your move** lists everything waiting on you, most urgent first: start the factory, approve a model,
+  fix and retry a stopped ticket, approve a passed ticket, review and merge a PR, renew the Claude token.
+  Each item says why, then gives the exact link (the GitHub issue, PR or Langfuse trace) or the command,
+  with a Copy button.
+- **The line** shows each ticket at its step: Queued, Triage, Plan, Tests, Code, Sandbox, Checks, Repair,
+  Your approval, PR review. Blue tags are moving, dashed tags are paused on the Claude plan limit, red
+  tags have stopped, and yellow tags are waiting for you.
+- **Finished this week** lists merged PRs and tickets triage turned down, with the reason.
+
+The board is **read-only**: it never approves or retries anything. A button on a local page cannot tell
+who clicked it, and any other site open in your browser could trigger it, so approval stays on the
+GitHub label (which checks who applied it) or `make approve`. The board tells you which one. It also:
+
+- listens on `127.0.0.1` only, refuses requests addressed to any other host name, and sends a strict
+  Content-Security-Policy;
+- reads the database through `factory_board`, a role that can only `SELECT`;
+- shows ticket text strictly as text, so an issue title can never run as code in your browser.
+
+The board marks a ticket finished when its issue closes, which merging the PR does (`Closes #n`).
+
 ## Daily use
 
+- Open the board (`make board`) to see what needs you.
 - Label issues `factory:ready` on GitHub, or drop a ticket JSON into `workspace/inbox/`
   (format in `workspace/inbox/README.md`).
 - The factory alerts when a run **passes** (approve with the `factory:approve` label or
@@ -183,7 +226,7 @@ These need the running stack and are checked by hand in Phase 1:
 
 ## What has been tested, and what has not
 
-Tested in this build (`make test`, 76 tests; set `FACTORY_TEST_DSN` to include the 20 Postgres ones):
+Tested in this build (`make test`, 97 tests; set `FACTORY_TEST_DSN` to include the 31 Postgres ones):
 routing for all three `local_mode`s, diff validation and forbidden paths, every FSM router, the real
 LangGraph wiring with stubbed nodes (repair loop, 3-repair cap, human gate, tamper halt), the breaker
 against real Postgres (run cap, daily cap, persistent trip), pool selection and catalog refresh,
@@ -198,7 +241,9 @@ logic → assertion; unused variable → lint repair; `eval` → blocking securi
 PR; no ESLint config → lint skipped; Jest missing → halt, not a paid repair). `scripts/claude-token.sh`
 was run against a fake `claude` CLI that prints setup-token's real output style, through both the Linux
 and a BSD-syntax `script(1)`: capture, masking, file mode, in-place rewrite, paste fallback, failed
-sign-in and expiry reporting. A real `claude setup-token` sign-in has not been run.
+sign-in and expiry reporting. A real `claude setup-token` sign-in has not been run. The board was run
+against seeded Postgres through its read-only role and checked in Chromium at desktop and phone widths,
+light and dark: no script errors, no sideways scrolling, and a hostile issue title rendered as text.
 
 Not yet exercised (Phase 0–1 on your Mac): Docker builds and the broker's container isolation, the
 egress proxy, real Claude/omlx calls, Langfuse ingestion, and the real GitHub API (push, PR creation,

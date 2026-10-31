@@ -20,6 +20,7 @@ import uuid
 import psycopg
 
 from factory.breaker import alert
+from factory.board_state import heartbeat, record_run, ticket_fields
 from factory.config import claude_token_warning, policy
 from factory.deps import Deps
 from factory.graph import compile_app, config_for
@@ -41,6 +42,25 @@ def migrate(dsn: str) -> None:
 def new_run_id(ticket_id: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", ticket_id.lower()).strip("-")[:40] or "ticket"
     return f"{slug}-{uuid.uuid4().hex[:8]}"
+
+
+def missing_roles() -> list[str]:
+    """Roles a run needs right now that have no qualified or trusted model."""
+    from factory.pool import NoQualifiedModel, get_pool
+    mode = policy().get("local_mode", "assist")
+    needed = ["plan", "generate_remote", "repair", "security_fix"]
+    needed += ["spillover"] if mode == "off" else ["classify"]
+    needed += ["generate"] if mode == "generate" else []
+    out = []
+    for role in needed:
+        try:
+            get_pool().select(role)
+        except NoQualifiedModel:
+            out.append(role)
+        except Exception as e:                      # database hiccup: report nothing rather than guess
+            print(f"[serve] role check failed: {e}", flush=True)
+            return []
+    return out
 
 
 def runs_today(dsn: str) -> int:
@@ -77,10 +97,16 @@ def run_or_park(deps: Deps, saver, run_id: str, first_input, intake=None) -> str
         app.invoke(first_input, cfg)
     except QuotaExhausted as e:
         alert(run_id, ticket.ticket_id, f"Claude plan limit reached; run parked at its last checkpoint ({e})")
+        record_run(deps.dsn, run_id, status="parked", detail=str(e))
         if intake:
             intake.report(ticket, run_id, "parked")
         return "parked"
     st, detail = outcome(app, cfg)
+    snap = app.get_state(cfg).values
+    record_run(deps.dsn, run_id, status=st, detail=detail,
+               pr_url=detail if st == "pr_open" else None,
+               stage="compile_pr" if st in ("awaiting_approval", "pr_open") else None,
+               repair_attempts=snap.get("repair_attempts", 0), models=snap.get("model_pins") or None)
     if st == "awaiting_approval":
         how = "add the approve label on the issue, or " if ticket.issue_number else ""
         alert(run_id, ticket.ticket_id, f"{ticket.ticket_id} passed tests and QA. To open the PR, {how}"
@@ -94,6 +120,7 @@ def run_or_park(deps: Deps, saver, run_id: str, first_input, intake=None) -> str
 
 def start_ticket(deps: Deps, saver, ticket: TicketSpec, intake=None) -> tuple[str, str]:
     run_id = new_run_id(ticket.ticket_id)
+    record_run(deps.dsn, run_id, **ticket_fields(ticket), status="running", stage="ingest")
     if intake:
         intake.report(ticket, run_id, "running")
     status = run_or_park(deps, saver, run_id, {"run_id": run_id, "ticket": ticket, "repair_attempts": 0,
@@ -113,19 +140,27 @@ def serve(deps: Deps) -> None:
         saver.setup()
         repos = ", ".join(r["repo"] for r in intake.cfg["repos"]) if intake else "none (inbox only)"
         print(f"[serve] watching {inbox}; GitHub intake: {repos}", flush=True)
-        last_token_check = 0.0
+        last_token_check = last_roles_check = 0.0
+        token_warning, missing = None, []
         while True:
             if time.time() - last_token_check >= 86_400:      # daily: missing or expiring Claude token
                 last_token_check = time.time()
-                warning = claude_token_warning()
-                if warning:
-                    alert("claude-token", "factory", warning)
+                token_warning = claude_token_warning()
+                if token_warning:
+                    alert("claude-token", "factory", token_warning)
+            if time.time() - last_roles_check >= 300:         # roles that would halt a run right now
+                last_roles_check = time.time()
+                missing = missing_roles()
+            limit = daily_limit()
+            heartbeat(deps.dsn, {"runs_today": runs_today(deps.dsn), "daily_limit": limit,
+                                 "token_warning": token_warning, "missing_roles": missing,
+                                 "local_mode": policy().get("local_mode"),
+                                 "intake_repos": [r["repo"] for r in intake.cfg["repos"]] if intake else []})
             if intake and intake.due():
                 intake.poll()
                 for run_id in intake.approvals():
                     run_or_park(deps, saver, run_id, None, intake)
             _retry_parked(deps, saver, inbox, intake)
-            limit = daily_limit()
             tickets = sorted(inbox.glob("*.json"), key=lambda p: p.stat().st_mtime)
             if tickets and (limit is None or runs_today(deps.dsn) < limit):
                 f = tickets[0]

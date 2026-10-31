@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Factory board</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <h1>Factory board</h1>
+    <div class="vitals" id="vitals" aria-live="polite"></div>
+  </header>
+
+  <p class="notice" id="notice" hidden></p>
+
+  <main>
+    <section class="moves" aria-labelledby="moves-title">
+      <h2 id="moves-title">Your move <span class="count" id="moves-count"></span></h2>
+      <ol class="move-list" id="moves"></ol>
+    </section>
+
+    <section class="line-section" aria-labelledby="line-title">
+      <h2 id="line-title">The line</h2>
+      <p class="hint">Every ticket at the step it has reached. Yellow tags are waiting for you.</p>
+      <div class="line" id="line" role="list"></div>
+    </section>
+
+    <section class="finished" aria-labelledby="finished-title">
+      <h2 id="finished-title">Finished this week</h2>
+      <ul class="finished-list" id="finished"></ul>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span id="updated">Loading…</span>
+    <span>Read-only. Approve with the GitHub label or the command shown.</span>
+  </footer>
+</body>
+</html>
