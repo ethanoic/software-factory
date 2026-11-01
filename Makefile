@@ -9,7 +9,7 @@ DEPS ?=
 OMLX_MODELS ?= $(HOME)/models/mlx
 PY ?= python3
 
-.PHONY: help init lock db hoststat runner-py runner-ts up down logs test check status approve pool claude-token claude-token-paste claude-token-check board db-board
+.PHONY: help init lock db hoststat runner-py runner-ts up down logs test test-sandbox sandbox-check runs-clean check status approve pool claude-token claude-token-paste claude-token-check board db-board
 
 help:
 	@echo "init      create folders, secrets placeholder, .env.factory"
@@ -20,6 +20,9 @@ help:
 	@echo "runner-ts DEPS=<repo>  build the Node (JavaScript or TypeScript) runner image with that repo's deps"
 	@echo "up / down / logs       start, stop, follow the factory"
 	@echo "test      run the factory's own unit tests (no services needed)"
+	@echo "test-sandbox           prove the runner is sealed: real container, no network, no .git, safe results"
+	@echo "sandbox-check          list runner containers or volumes left behind (should be none)"
+	@echo "runs-clean DAYS=14     delete clones of finished runs older than DAYS from the runs volume"
 	@echo "pool ARGS=...          model pool: refresh, catalog, list, trust, promote, once"
 	@echo "claude-token           get a Claude plan token with your current login (claude setup-token)"
 	@echo "claude-token-check     show the stored token's expiry and test it from the factory"
@@ -27,7 +30,7 @@ help:
 	@echo "db-board               create the board's read-only database role (once)"
 
 init:
-	mkdir -p workspace/inbox workspace/runs hoststat secrets qualification/code qualification/triage
+	mkdir -p workspace/inbox hoststat secrets qualification/code qualification/triage
 	@[ -f .env.factory ] || (cp .env.factory.example .env.factory && chmod 600 .env.factory && echo "created .env.factory")
 	@[ -f secrets/github_token ] || (touch secrets/github_token && chmod 600 secrets/github_token && echo "put a fine-grained GitHub token in secrets/github_token")
 	@[ -f secrets/claude_oauth_token ] || (touch secrets/claude_oauth_token && chmod 600 secrets/claude_oauth_token && echo "run make claude-token to store your Claude plan token")
@@ -65,11 +68,13 @@ runner-ts:
 	-cp $(DEPS)/package.json $(DEPS)/package-lock.json build/runner-ts/deps/ 2>/dev/null
 	docker build -t factory-runner-ts:locked build/runner-ts
 
+SERVICES = orchestrator pool-worker sandbox-broker docker-proxy egress-proxy board
+
 up:
-	$(COMPOSE) up -d --build orchestrator pool-worker sandbox-broker egress-proxy board
+	$(COMPOSE) up -d --build $(SERVICES)
 
 down:
-	$(COMPOSE) stop orchestrator pool-worker sandbox-broker egress-proxy board
+	$(COMPOSE) stop $(SERVICES)
 
 logs:
 	$(COMPOSE) logs -f orchestrator pool-worker sandbox-broker
@@ -111,3 +116,20 @@ approve:
 
 test:
 	cd orchestrator && POOL_FILE=../pool.yaml LANGFUSE_DISABLED=1 $(PY) -m pytest -q ../tests
+
+# Builds a test-only runner that probes its sandbox and plants the review's attacks, then runs it through
+# the real broker code against Docker. Needs Docker running and `pip install docker fastapi httpx`.
+test-sandbox:
+	docker build -q -t factory-runner-test:local tests/runner-probe
+	cd orchestrator && FACTORY_TEST_RUNNER_IMAGE=factory-runner-test:local POOL_FILE=../pool.yaml \
+	  LANGFUSE_DISABLED=1 $(PY) -m pytest -q -rs ../tests/test_security.py
+
+sandbox-check:
+	@echo "Runner and loader containers (should be empty unless a run is in progress):"
+	@docker ps -a --filter label=factory.run_id --format '  {{.Names}}  {{.Status}}'
+	@echo "Per-run volumes (should be empty unless a run is in progress):"
+	@docker volume ls --filter label=factory.run_id --format '  {{.Name}}'
+
+DAYS ?= 14
+runs-clean:
+	$(COMPOSE) exec orchestrator python -m factory.runner clean --days $(DAYS)

@@ -8,6 +8,7 @@ x-orchestrator-env: &orch_env
   QUALIFICATION_DIR: /app/qualification
   OMLX_BASE_URL: http://host.docker.internal:8000/v1
   BROKER_URL: http://sandbox-broker:8080
+  RUNS_ROOT: /runs
   LANGFUSE_HOST: http://langfuse-web:3000
   LANGFUSE_PUBLIC_URL: http://localhost:3000
   RUN_CAP_USD: "2.00"
@@ -29,9 +30,15 @@ x-hardened: &hardened
   security_opt: ["no-new-privileges:true"]
 
 networks:
-  control: { internal: true }      # orchestrator <-> broker <-> proxy
-  data:    { internal: true }      # orchestrator <-> postgres, langfuse
-  egress:  {}                      # proxy only
+  control:   { internal: true }    # orchestrator <-> broker <-> proxy
+  data:      { internal: true }    # orchestrator <-> postgres, langfuse
+  egress:    {}                    # proxy only
+  dockerapi: { internal: true }    # broker <-> docker-proxy only
+
+# The factory's git clones and frozen tests live here, in a Docker volume no runner ever mounts.
+# (Runners get their own throwaway volumes from the broker; see sandbox_broker/app.py.)
+volumes:
+  factory-runs: {}
 
 services:
   orchestrator:
@@ -43,7 +50,8 @@ services:
     env_file: [.env.factory]       # LANGFUSE_*_KEY, ALERT_WEBHOOK_URL, optional keys (Claude token: secrets/)
     secrets: [github_token, claude_oauth_token]
     volumes:
-      - ./workspace:/workspace:rw
+      - ./workspace:/workspace:rw          # inbox/ only
+      - factory-runs:/runs                 # clones, frozen tests, results: never mounted into a runner
       - ./hoststat:/hoststat:ro
       - ./pool.yaml:/app/pool.yaml:ro
       - ./qualification:/app/qualification:ro
@@ -61,7 +69,8 @@ services:
     env_file: [.env.factory]
     secrets: [github_token, claude_oauth_token]
     volumes:
-      - ./workspace:/workspace:rw
+      - ./workspace:/workspace:rw          # inbox/ only
+      - factory-runs:/runs                 # clones, frozen tests, results: never mounted into a runner
       - ./hoststat:/hoststat:ro
       - ./pool.yaml:/app/pool.yaml:ro
       - ./qualification:/app/qualification:ro
@@ -70,14 +79,33 @@ services:
     mem_limit: 768m
     restart: unless-stopped
 
-  sandbox-broker:
+  sandbox-broker:                  # starts sealed runners; no host folders, no Docker socket, no egress
+    <<: *hardened
     build: ./sandbox_broker
-    networks: [control]            # no egress
+    networks: [control, dockerapi]
     environment:
-      HOST_WORKSPACE_ROOT: ${PWD}/workspace      # absolute macOS path, needed for runner bind mounts
+      DOCKER_HOST: tcp://docker-proxy:2375
+    depends_on: [docker-proxy]
+    mem_limit: 512m
+    restart: unless-stopped
+
+  docker-proxy:                    # the only holder of the Docker socket; allows container + volume calls only
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    networks: [dockerapi]
+    environment:
+      CONTAINERS: 1                # create, archive in/out, wait, logs, remove
+      VOLUMES: 1                   # per-run volumes
+      POST: 1                      # write methods (POST/PUT/DELETE) on the sections above
+      ALLOW_START: 1
+      ALLOW_RESTARTS: 1            # kill, for runners that pass the wall clock
+      EXEC: 0
+      IMAGES: 0
+      NETWORKS: 0
+      BUILD: 0
+      SYSTEM: 0
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    mem_limit: 256m
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    mem_limit: 64m
     restart: unless-stopped
 
   egress-proxy:

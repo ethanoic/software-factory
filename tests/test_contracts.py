@@ -272,10 +272,10 @@ def test_bandit_high_findings_block_the_pr(tmp_path):
     from factory.nodes import qa
 
     class D:
-        def repo_path(self, s):
+        def run_dir(self, s):
             return tmp_path
-    (tmp_path / ".factory").mkdir()
-    (tmp_path / ".factory" / "qa.json").write_text(json.dumps({"results": [
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "qa.json").write_text(json.dumps({"results": [
         {"filename": "app.py", "line_number": 3, "issue_severity": "HIGH", "issue_text": "subprocess shell=True"},
         {"filename": "app.py", "line_number": 9, "issue_severity": "LOW", "issue_text": "assert used"}]}))
     r = qa({}, D())["qa"]
@@ -334,10 +334,10 @@ def test_eslint_security_errors_block_and_warnings_do_not(tmp_path):
     from factory.nodes import qa
 
     class D:
-        def repo_path(self, s):
+        def run_dir(self, s):
             return tmp_path
-    (tmp_path / ".factory").mkdir()
-    (tmp_path / ".factory" / "qa.json").write_text(json.dumps([{"filePath": "/workspace/src/greet.js", "messages": [
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "qa.json").write_text(json.dumps([{"filePath": "/workspace/src/greet.js", "messages": [
         {"ruleId": "no-eval", "severity": 2, "line": 3, "message": "eval can be harmful."},
         {"ruleId": "security/detect-object-injection", "severity": 1, "line": 5, "message": "Generic Object Injection Sink"}]}]))
     r = qa({}, D())["qa"]

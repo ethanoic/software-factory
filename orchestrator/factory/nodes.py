@@ -1,10 +1,10 @@
 """FSM nodes (spec §1.3). Each takes (state, deps) and returns a partial state update."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import html
 import json
-import os
 import pathlib
 import re
 import shutil
@@ -16,6 +16,7 @@ import httpx
 
 from factory import patches, prompts
 from factory.breaker import PatchRejected, alert
+from factory.config import is_factory_repo, redact
 from factory.gateway import Task, TaskKind
 from factory.obs import trace_url
 from factory.state import (FailureClass, Patch, Plan, QAResult, SandboxResult, Tier, TicketSpec)
@@ -25,6 +26,7 @@ BRANCH_RE = re.compile(r"^[A-Za-z0-9_./-]{1,100}$")
 REJECT_RE = re.compile(r"(?i)\b(migrations?|terraform|kubernetes|helm|secrets?|credentials?|passwords?|"
                        r"api[ _-]?keys?|\.github/workflows|ci pipeline|infrastructure|dockerfile)\b")
 SECRET_RE = re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*\S+")
+RESULT_FILES = {"lint.json", "qa.json", "junit.xml", "jest.json", "test.log", "result.json"}
 TAG_RE = re.compile(r"<[^>]+>")
 JSON_RE = re.compile(r"\{.*\}", re.S)
 
@@ -43,12 +45,15 @@ def ingest(state, deps):
         return {"halt_reason": f"invalid repo or branch: {t.repo}@{t.base_branch}"}
     body = TAG_RE.sub("", html.unescape(t.body))[:16_000]
     ticket = t.model_copy(update={"body": body, "title": t.title[:300]})
+    if is_factory_repo(t.repo):
+        return {"halt_reason": f"refused: {t.repo} is the factory's own repo. Change the factory by "
+                               "pull request and `make up`, never through a factory run."}
     repo = deps.repo_path(state)
     if not (repo / ".git").exists():
         repo.parent.mkdir(parents=True, exist_ok=True)
-        r = subprocess.run(["git", "clone", "--depth", "50", "--branch", t.base_branch,
+        r = subprocess.run(["git", *patches.GIT_HARDEN, "clone", "--depth", "50", "--branch", t.base_branch,
                             f"https://github.com/{t.repo}.git", str(repo)],
-                           capture_output=True, env={**os.environ, **deps.git_auth_env()})
+                           capture_output=True, env=patches.git_env(deps.git_auth_env()))
         if r.returncode != 0:
             return {"halt_reason": "clone failed: " + r.stderr.decode(errors="replace")[-500:]}
     sha = patches.git(repo, "rev-parse", "HEAD").stdout.decode().strip()
@@ -194,27 +199,48 @@ def classify_failure(out: pathlib.Path, broker: dict) -> tuple[FailureClass, int
     return FailureClass.NONE, passed, failed, lint, ""
 
 
+def write_results(dest: pathlib.Path, files: dict) -> pathlib.Path:
+    """Write the broker's result files into a fresh, factory-private folder. The factory creates every
+    file itself from JSON strings, so nothing the runner made (a symlink, a device) is ever opened here."""
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    for name, text in (files or {}).items():
+        if name in RESULT_FILES and isinstance(text, str):
+            (dest / name).write_text(text[:1_048_576])
+    return dest
+
+
 def sandbox(state, deps):
     run_dir, repo = deps.run_dir(state), deps.repo_path(state)
     patches.reset_to_base(repo, state["base_sha"])
     patches.apply_patch(repo, state["patch"].unified_diff)
-    (repo / ".factory").mkdir(exist_ok=True)
-    (repo / ".factory" / "changed_files.txt").write_text("\n".join(patches.changed_files(state["patch"].unified_diff)))
-    broker = httpx.post(f"{deps.broker_url}/run", timeout=360,
-                        json={"run_id": state["run_id"], "language": state["ticket"].language}).json()
+    try:
+        source = patches.source_archive(repo)
+    except PatchRejected as e:                          # the repo itself, not the patch: a human must look
+        return {"halt_reason": f"sandbox environment: {e}"}
+    req = {"run_id": state["run_id"], "language": state["ticket"].language,
+           "source_tar_b64": base64.b64encode(source).decode(),
+           "tests_tar_b64": base64.b64encode(patches.dir_archive(run_dir / "frozen")).decode(),
+           "changed_files": patches.changed_files(state["patch"].unified_diff)}
+    resp = httpx.post(f"{deps.broker_url}/run", timeout=420, json=req)
+    if resp.status_code >= 400:
+        return {"halt_reason": f"sandbox environment: broker refused the run ({resp.status_code} {resp.text[:300]})"}
+    broker = resp.json()
+    results = write_results(run_dir / "results", broker.get("files"))
     hash_ok = tree_sha256(run_dir / "frozen") == state["tests_sha256"]
-    fc, passed, failed, lint, excerpt = classify_failure(repo / ".factory", broker)
+    fc, passed, failed, lint, excerpt = classify_failure(results, broker)
     if not hash_ok:
         fc = FailureClass.TAMPER
     return {"sandbox": SandboxResult(exit_code=int(broker.get("exit_code", 1)), passed=passed, failed=failed,
                                      lint_errors=lint, failure_class=fc,
-                                     stack_excerpt=SECRET_RE.sub(r"\1=<redacted>", excerpt)[-8000:],
+                                     stack_excerpt=redact(excerpt)[-8000:],
                                      duration_s=float(broker.get("duration_s", 0.0)), tests_hash_ok=hash_ok)}
 
 
 # ------------------------------------------------------------------ QA (T1)
 def qa(state, deps):
-    f = deps.repo_path(state) / ".factory" / "qa.json"
+    f = deps.run_dir(state) / "results" / "qa.json"
     high = medium = 0
     report = ""
     if f.exists():
@@ -289,7 +315,7 @@ def compile_pr(state, deps):
         return {"pr_url": "dry-run"}
     t, repo = state["ticket"], deps.repo_path(state)
     branch = "factory/" + re.sub(r"[^a-z0-9-]+", "-", t.ticket_id.lower())
-    gitenv = {**os.environ, **deps.git_auth_env(),
+    gitenv = {**deps.git_auth_env(),
               "GIT_AUTHOR_NAME": "AI Software Factory", "GIT_AUTHOR_EMAIL": "factory@localhost",
               "GIT_COMMITTER_NAME": "AI Software Factory", "GIT_COMMITTER_EMAIL": "factory@localhost"}
     patches.reset_to_base(repo, state["base_sha"])
@@ -299,9 +325,9 @@ def compile_pr(state, deps):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(state["plan"].test_sources[f])
     for args in (["checkout", "-B", branch], ["add", "-A"],
-                 ["commit", "-m", f"{t.ticket_id}: {t.title}"[:200]],
-                 ["push", "--force-with-lease", "origin", f"HEAD:refs/heads/{branch}"]):
-        r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=gitenv)
+                 ["commit", "--no-verify", "-m", f"{t.ticket_id}: {t.title}"[:200]],
+                 ["push", "--no-verify", "--force-with-lease", "origin", f"HEAD:refs/heads/{branch}"]):
+        r = patches.git(repo, *args, check=False, env=gitenv)
         if r.returncode != 0:
             return {"halt_reason": f"git {args[0]} failed: " + r.stderr.decode(errors="replace")[-400:]}
     spent = deps.breaker_for(state["run_id"]).spent()
@@ -315,7 +341,7 @@ def compile_pr(state, deps):
                    headers={"Authorization": f"Bearer {deps.github_token()}",
                             "Accept": "application/vnd.github+json"},
                    json={"title": f"{t.ticket_id}: {t.title}"[:250], "head": branch, "base": t.base_branch,
-                         "body": body, "draft": True})
+                         "body": redact(body), "draft": True})
     if r.status_code == 422 and "already exists" in r.text:
         return {"pr_url": f"https://github.com/{t.repo}/pulls?q=head:{branch}"}
     if r.status_code >= 300:

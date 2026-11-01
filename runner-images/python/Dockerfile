@@ -10,5 +10,8 @@ COPY deps/ /opt/deps/
 RUN set -e; for f in /opt/deps/requirements*.txt; do [ -f "$f" ] && pip install --no-cache-dir -r "$f"; done; true
 
 COPY entrypoint.sh /opt/factory/entrypoint.sh
+# Mount points for the broker's per-run volumes. A new volume takes the owner of the folder it is
+# mounted on, so the runner (UID 10001) can write its source and results folders.
+RUN mkdir -p /workspace/tests /workspace/.factory && chown -R 10001:10001 /workspace
 RUN chmod 755 /opt/factory/entrypoint.sh && useradd --uid 10001 --no-create-home runner
 USER 10001

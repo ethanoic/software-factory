@@ -52,6 +52,15 @@ make runner-ts DEPS=examples/hello-node
 There is one Node runner image at a time. Rebuild it whenever the app's `package.json` changes, or when you
 point the factory at a different Node repository.
 
+Then prove the sandbox is sealed on your Docker before any code runs in it:
+
+```bash
+make test-sandbox
+```
+
+Every test must pass with none skipped. The factory never shares a folder with the runner: it sends the
+source in as an archive with no `.git` and gets only result files back (README, "Isolation").
+
 ## 4. Point the factory at the repository
 
 Replace the `repos` list in `github.yaml`:
@@ -222,6 +231,8 @@ Inbox tickets report through alerts and `make logs` instead of issue labels. App
 | `factory:queued` but nothing starts | The daily limit of 4 runs on Pro is reached | Waits for the 24-hour window; see `subscription.max_factory_runs_per_day` in `pool.yaml` |
 | Halted: "no qualified model for role …" | Step 5 not done, or `qualification/` changed | `make pool ARGS="list"`, then trust again |
 | Halted: "sandbox environment" | The runner image is missing a dependency, or Jest found no tests | Rebuild with step 3; re-add `factory:ready` |
+| Halted: "sandbox environment: broker refused the run" | The source held something other than plain files, or was too large | Read the reason; see "When something goes wrong" in the README |
+| `make sandbox-check` lists leftovers while idle | A run was interrupted | Remove them with the commands in the README's "Isolation" section |
 | Halted: "repair limit reached" | The ticket was ambiguous, or the change was too big | Sharpen the acceptance criteria, then re-add `factory:ready` |
 | `factory:parked` | Claude Pro usage limit reached | Nothing to do: the run resumes on its own (hourly, up to 6 tries) |
 | Rejected, but the ticket is legitimate | It contains a trigger word | Reword it; see "Writing tickets" above |

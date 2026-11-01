@@ -12,11 +12,19 @@ the sample Node.js app in `examples/hello-node` from a GitHub issue to a merged 
  GitHub issues labelled factory:ready (polled)  +  workspace/inbox/*.json
         │
         ▼
- ┌──────────────┐  internal   ┌────────────────┐  docker.sock  ┌──────────────────────────┐
- │ orchestrator │────────────▶│ sandbox-broker │──────────────▶│ runner-<run_id>          │
- │ LangGraph FSM│  control net└────────────────┘               │ network=none, read-only, │
- │ (no socket)  │                                              │ UID 10001, 300 s         │
- └──┬────┬──────┘                                              └──────────────────────────┘
+ ┌──────────────┐ source + tests ┌────────────────┐  container  ┌──────────────┐ docker.sock
+ │ orchestrator │  as archives   │ sandbox-broker │  + volume   │ docker-proxy │────────────▶ Docker
+ │ LangGraph FSM│───────────────▶│ (no socket, no │  calls only │ (only holder │
+ │ holds tokens,│◀───────────────│  host folders) │────────────▶│  of socket)  │
+ │ git clones in│ results as JSON└───────┬────────┘             └──────────────┘
+ │ factory-runs │                        │ archive in / results out, then delete
+ │ volume       │                        ▼
+ └──┬────┬──────┘              ┌──────────────────────────────────────────┐
+    │    │                     │ runner-<run_id>: sealed                  │
+    │    │                     │ network=none · read-only root · UID 10001│
+    │    │                     │ no .git · no host folders · no tokens    │
+    │    │                     │ tests read-only · 300 s · then deleted   │
+    │    │                     └──────────────────────────────────────────┘
     │    │ data net (internal)
     │    ├──────────▶ postgres  (checkpoints, run ledger, model pool)
     │    └──────────▶ langfuse  (traces, cost, savings)
@@ -39,7 +47,7 @@ the sample Node.js app in `examples/hello-node` from a GitHub issue to a merged 
 | D5 | OpenRouter catalog for discovery and list prices only; no code goes through an aggregator; no LiteLLM |
 | D6 | Model evals ≤ US$70/month billed (≈ SGD 90); Claude evals on Pro cost $0 but use plan limits |
 | D7 | 3 repairs max; US$2/run and US$10/day for billed calls; 4 runs/day on Pro; 45 min per run |
-| D8 | Broker-only Docker socket; runner with no network; egress allowlist; hashed lockfiles |
+| D8 | Sealed runner: no network, no shared folders, no `.git`, no tokens; code goes in and results come out as archives through the broker. Only `docker-proxy` holds the Docker socket. The factory never works on its own repo. Egress allowlist; hashed lockfiles |
 | D9 | GitHub Issues polled every 2 min per repo in `github.yaml`; only issues a maintainer labels `factory:ready`; status written back as labels and comments. JSON files in `workspace/inbox/` stay as a fallback |
 | D10 | Self-hosted Langfuse: one trace per run, explicit cost, `savings_usd` at list price |
 
@@ -53,7 +61,9 @@ Run everything from the folder that holds your existing `compose.yml` (postgres 
 repo's files next to it.
 
 1. **Docker Desktop**: Settings → Resources → Memory 10 GB, swap 1 GB, CPUs 6. File sharing: remove
-   `/Users`, add only this folder (rule R1). Turn on Enhanced Container Isolation if your plan has it.
+   `/Users`, add only this folder (rule R1). Runners never use file sharing; only the factory's own
+   services read this folder (inbox, config, secrets). If you turn on Enhanced Container Isolation,
+   allow the `tecnativa/docker-socket-proxy` image to mount the Docker socket, or `docker-proxy` cannot start.
 2. `make init` — creates `workspace/`, `secrets/`, `.env.factory` (chmod 600).
 3. **Claude Pro token**: `make claude-token` (see "Claude plan token" below). It uses your current
    claude.ai login and stores a one-year token in `secrets/claude_oauth_token`. Keep `ANTHROPIC_API_KEY`
@@ -72,8 +82,11 @@ repo's files next to it.
    build without them.
 10. `make runner-py DEPS=/path/to/target-repo` (or `runner-ts`) — bakes the target repo's dependencies
     into the runner image, because the runner has no network.
-11. `make up`, then `make logs`.
-12. `make board` opens the factory board at http://localhost:8090. Keep it open: it lists what needs
+11. `make test-sandbox` — builds a test-only runner and proves, against your Docker, that runners are
+    sealed (see "Isolation" below). Needs `pip install docker fastapi httpx` in the Python you use for
+    `make test`. Do not go on until it passes.
+12. `make up`, then `make logs`.
+13. `make board` opens the factory board at http://localhost:8090. Keep it open: it lists what needs
     you and where every ticket is (see "Factory board" below).
 
 ## Claude plan token
@@ -187,6 +200,85 @@ GitHub label (which checks who applied it) or `make approve`. The board tells yo
 
 The board marks a ticket finished when its issue closes, which merging the PR does (`Closes #n`).
 
+## Isolation: how the factory protects itself
+
+Code the factory writes is treated as hostile, even when the ticket came from you: the model also reads
+repo files and issue text you did not write. That code only ever runs in a **sealed runner** that
+shares nothing with the factory. The factory's own code is baked into its images by `make up`, and
+the factory refuses to work on its own repo, so a run can never change the factory.
+
+### What lives where
+
+| Part | Holds | Can reach | Never has |
+| --- | --- | --- | --- |
+| `orchestrator`, `pool-worker` | Your tokens (Docker secrets); git clones, frozen tests and results in the `factory-runs` volume; config files read-only | GitHub, Claude and allowlisted APIs through `egress-proxy`; Postgres; Langfuse; the broker | Target repo code running inside it; git hooks (every git call runs with hooks and `fsmonitor` off) |
+| `sandbox-broker` | The fixed runner template | `docker-proxy` only | Tokens, host folders, the Docker socket, internet |
+| `docker-proxy` | The Docker socket | Docker: container and volume calls only | `exec`, image, network, build or system calls |
+| `runner-<run_id>` | A copy of the patched source (no `.git`), the frozen tests (read-only) | Nothing: `network=none` | Tokens, host folders, `.git`, the factory's clone; it is deleted after each run |
+
+### One sandbox run, step by step
+
+1. The factory applies the model's diff to its clone, then packs the source into an archive: regular
+   files only, no `.git`, no symlinks, no `tests/`. The frozen tests go into a second archive.
+2. The broker rebuilds both archives from scratch. Anything that is not a plain file or folder
+   (a link, a device, `.git`, a path with `..`) makes it refuse the run.
+3. The broker creates three throwaway Docker volumes (source, tests, results) and copies the archives
+   in. Then it starts the runner with no network, a read-only root, no capabilities, 2 GB, 256
+   processes and 300 seconds.
+4. When the runner exits, the broker copies the results folder out. It keeps only the six known result
+   files (`test.log`, `junit.xml`, `jest.json`, `lint.json`, `qa.json`, `result.json`), each a plain file
+   under 1 MB. Everything else is dropped.
+5. The broker deletes the runner and its volumes and returns the results as JSON. The factory writes
+   them into its own folder and reads them from there. Before any text goes into a prompt, trace,
+   GitHub comment or PR, it is scrubbed of the secret values the factory holds.
+
+### The factory never changes itself
+
+- Runs against `ethanoic/software-factory` are refused, from GitHub intake and from the inbox alike.
+  If you fork the factory, set `FACTORY_SELF_REPOS` (comma-separated `owner/name`) in `.env.factory`.
+- To change the factory: pull request, review, merge, `git pull` on the Mac, then `make up`. That
+  rebuilds the images from the merged code. Nothing a run produces can reach those images.
+
+### Checks to run
+
+| When | Run | Expect |
+| --- | --- | --- |
+| After setup, and after every Docker Desktop update | `make test-sandbox` | All tests pass, none skipped. A skip means Docker or the test image is missing; a failure means a runner was not sealed. Do not start the factory until it passes. |
+| Any time, especially after a crash | `make sandbox-check` | Both lists empty while no run is in progress |
+| Weekly | `make runs-clean` (or `DAYS=30`) | Deletes clones of finished runs older than 14 days. Runs that are running, parked or awaiting approval are kept. |
+
+### When something goes wrong
+
+| You see | It means | Do this |
+| --- | --- | --- |
+| Halt: `sandbox environment: broker refused the run (400 rejected: …)` | The source or tests contained something other than plain files and folders, or were over 64 MB | Read the reason. A repo over 60 MB of source is too big for the sandbox; trim it or split it. |
+| Halt: `sandbox environment: repository too large…` | Over 60 MB of source after the patch | Same as above |
+| Halt: `refused: … is the factory's own repo` | A ticket pointed at the factory itself | Expected. Change the factory by pull request instead. |
+| `make sandbox-check` lists containers or volumes when nothing is running | The broker stopped mid-run (crash, `make down`, Docker restart) | `docker rm -f $(docker ps -aq --filter label=factory.run_id)` then `docker volume rm $(docker volume ls -q --filter label=factory.run_id)`. A retry of the same run also cleans up after itself. |
+| `docker-proxy` restarts in a loop, or runs halt with a broker error 500 | The proxy cannot reach the Docker socket | Docker Desktop → Settings → Advanced → allow the default Docker socket. If Enhanced Container Isolation is on, allow the `tecnativa/docker-socket-proxy` image to mount the socket, or turn it off. |
+| A run halts because a package is missing | The runner has no network, so dependencies come only from the image | Add the package to the target repo, then `make runner-py DEPS=…` or `make runner-ts DEPS=…` and retry |
+
+### If you think a run did something it should not
+
+1. `make down`.
+2. Revoke the GitHub token at github.com → Settings → Developer settings, make a new one, and save it
+   to `secrets/github_token`. Run `make claude-token` to replace the Claude token.
+3. On GitHub, check the target repos for unexpected `factory/*` branches, pushes and pull requests.
+4. Open the run's Langfuse trace: each generate and repair step shows the exact diff the model wrote.
+5. `make sandbox-check`, then `make test-sandbox`, then `make up`.
+
+### Still open (do these by hand until fixed)
+
+The sealed runner closes the review's two critical findings (F1 and F2). Three gaps remain:
+
+- **A runner can still forge a pass.** It writes its own test report, so code that exits early or
+  fakes `junit.xml` can look green. Before you approve, read the diff in the trace. Before you merge,
+  read the draft PR's diff.
+- **The diff filter allows test and tool config files** such as `conftest.py`, `jest.config.js` and
+  `.npmrc`. Treat any change to those in a factory PR as a red flag.
+- **Pushes may trigger the target repo's CI.** Approving pushes a `factory/*` branch. If that repo has
+  workflows that run on every push with secrets, limit them to protected branches first.
+
 ## Daily use
 
 - Open the board (`make board`) to see what needs you.
@@ -196,6 +288,7 @@ The board marks a ticket finished when its issue closes, which merging the PR do
   `make approve RUN=<run_id>`), **halts** (reason + Langfuse trace link), or **parks** on plan limits
   (it retries hourly, up to 6 times).
 - `make status` lists recent runs and spend.
+- Weekly: `make runs-clean` and a glance at `make sandbox-check` (see "Isolation").
 
 ## Rollout gates
 
@@ -215,9 +308,10 @@ These need the running stack and are checked by hand in Phase 1:
 
 | Check | How |
 | --- | --- |
+| Runner is sealed | `make test-sandbox` passes: no network, no `.git`, tests read-only, symlinked or oversized results dropped, nothing left behind |
 | Runner has no network | a ticket whose test opens a socket to 1.1.1.1 must fail, not hang |
 | Runner cannot see home | a test that lists `/Users` must fail |
-| Frozen tests are tamper-proof | edit a file in `workspace/runs/<id>/frozen` during a run → run halts as `tamper` |
+| Frozen tests are tamper-proof | `make test-sandbox` shows the tests folder is read-only inside the runner; the factory also checks the frozen tests' hash after every run |
 | Breaker trips before the call | set `RUN_CAP_USD=0.01` with a billed route → halt + alert, no provider call |
 | 4th repair refused | a ticket whose tests cannot pass halts after 3 repairs |
 | Local cost is $0.00 | Langfuse shows the triage generation at $0.00 with a `savings_usd` score |
@@ -226,7 +320,8 @@ These need the running stack and are checked by hand in Phase 1:
 
 ## What has been tested, and what has not
 
-Tested in this build (`make test`, 97 tests; set `FACTORY_TEST_DSN` to include the 31 Postgres ones):
+Tested in this build (`make test`, 114 tests with `FACTORY_TEST_DSN` set and Docker running; 30 need
+Postgres and 1 needs Docker):
 routing for all three `local_mode`s, diff validation and forbidden paths, every FSM router, the real
 LangGraph wiring with stubbed nodes (repair loop, 3-repair cap, human gate, tamper halt), the breaker
 against real Postgres (run cap, daily cap, persistent trip), pool selection and catalog refresh,
@@ -245,8 +340,16 @@ sign-in and expiry reporting. A real `claude setup-token` sign-in has not been r
 against seeded Postgres through its read-only role and checked in Chromium at desktop and phone widths,
 light and dark: no script errors, no sideways scrolling, and a hostile issue title rendered as text.
 
-Not yet exercised (Phase 0–1 on your Mac): Docker builds and the broker's container isolation, the
-egress proxy, real Claude/omlx calls, Langfuse ingestion, and the real GitHub API (push, PR creation,
+The sealed runner was run against a real Docker Engine 29 daemon on Linux: the factory's own sandbox
+step called the live broker, which loaded a test runner through per-run volumes. Inside, the runner had
+no network, no `.git`, no symlink from the repo, and a read-only tests folder. Its symlinked log,
+2 MB lint file and nested file were dropped, and its containers and volumes were gone afterwards. A
+`pre-commit` hook and `core.fsmonitor` planted in the factory's clone did not run during the factory's
+git calls. The real runner images, `docker-proxy` and Docker Desktop on macOS were not available there.
+
+Not yet exercised (Phase 0–1 on your Mac): building the runner, broker and proxy images, the sealed
+runner on Docker Desktop through `docker-proxy` (`make test-sandbox` covers the runner, not the proxy),
+the egress proxy, real Claude/omlx calls, Langfuse ingestion, and the real GitHub API (push, PR creation,
 label and permission calls). Check in
 particular:
 - `host.docker.internal` resolving from the `egress-proxy` container on your Docker Desktop version.

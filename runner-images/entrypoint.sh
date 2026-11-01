@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Baked into the runner images; never mounted. Runs with no network, read-only root, UID 10001.
+# The broker copies the source and frozen tests in (no .git, no shared folders) and copies .factory/ out.
 # Lint and security scan cover only the files the patch changed (.factory/changed_files.txt, written
-# by the orchestrator), so pre-existing issues in the repo never fail a run.
+# by the broker), so pre-existing issues in the repo never fail a run.
 set -uo pipefail
 export PYTHONDONTWRITEBYTECODE=1          # nothing may be written next to the frozen tests
 ws="${FACTORY_WORKSPACE:-/workspace}"     # override only for local testing of this script
