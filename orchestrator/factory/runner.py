@@ -5,6 +5,7 @@
   python -m factory.runner approve <run_id>   human gate: open the PR for a run waiting at compile_pr
   python -m factory.runner resume  <run_id>   continue a parked run from its last checkpoint
   python -m factory.runner status             list recent runs
+  python -m factory.runner clean [--days N]   delete finished runs' clones from the runs volume
 """
 from __future__ import annotations
 
@@ -197,6 +198,26 @@ def _retry_parked(deps: Deps, saver, inbox: pathlib.Path, intake=None) -> None:
             shutil.move(f, inbox / "done" / f.name)
 
 
+KEEP_STATUSES = ("running", "parked", "awaiting_approval")   # these still need their clone
+
+
+def clean(dsn: str, runs_root: pathlib.Path, days: int) -> list[str]:
+    """Delete run folders (clone, frozen tests, results) older than `days` whose run no longer needs
+    them. Runs that are running, parked or waiting for approval are always kept."""
+    with psycopg.connect(dsn) as c:
+        keep = {r[0] for r in c.execute("SELECT run_id FROM runs WHERE status = ANY(%s)",
+                                        (list(KEEP_STATUSES),)).fetchall()}
+    cutoff, removed = time.time() - days * 86_400, []
+    for d in sorted(runs_root.iterdir()) if runs_root.is_dir() else []:
+        if d.is_dir() and not d.is_symlink() and d.name not in keep and d.stat().st_mtime < cutoff:
+            for p in d.rglob("*"):                  # frozen tests are read-only on disk
+                if not p.is_symlink():
+                    p.chmod(0o700 if p.is_dir() else 0o600)
+            shutil.rmtree(d)
+            removed.append(d.name)
+    return removed
+
+
 def status(dsn: str) -> None:
     with psycopg.connect(dsn) as c:
         rows = c.execute("""SELECT run_id, started_at, spent_usd, tripped, coalesce(trip_reason, '')
@@ -211,6 +232,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("serve")
     sub.add_parser("status")
     sub.add_parser("migrate")
+    sub.add_parser("clean").add_argument("--days", type=int, default=14)
     p_run = sub.add_parser("run"); p_run.add_argument("ticket_file")
     for name in ("approve", "resume"):
         sub.add_parser(name).add_argument("run_id")
@@ -224,6 +246,10 @@ def main(argv: list[str] | None = None) -> None:
         return serve(deps)
     if a.cmd == "status":
         return status(deps.dsn)
+    if a.cmd == "clean":
+        gone = clean(deps.dsn, deps.runs_root, a.days)
+        print(f"removed {len(gone)} finished run folder(s) older than {a.days} days" + (": " + ", ".join(gone) if gone else ""))
+        return
 
     from langgraph.checkpoint.postgres import PostgresSaver
 

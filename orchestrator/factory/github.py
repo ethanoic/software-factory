@@ -19,6 +19,7 @@ import httpx
 import psycopg
 import yaml
 
+from factory.config import is_factory_repo, redact
 from factory.state import TicketSpec
 
 API = "https://api.github.com"
@@ -80,6 +81,9 @@ def validate(cfg: dict) -> dict:
     for r in repos:
         if not REPO_RE.fullmatch(r.get("repo", "")):
             raise SystemExit(f"github.yaml: invalid repo {r.get('repo')!r} (expected owner/name)")
+        if is_factory_repo(r["repo"]):
+            raise SystemExit(f"github.yaml: {r['repo']} is the factory's own repo; the factory never works on "
+                             "itself. Remove it from `repos` (change the factory by pull request instead).")
         r.setdefault("base_branch", "main")
         if r.setdefault("language", "python") not in ("python", "javascript", "typescript"):
             raise SystemExit(f"github.yaml: {r['repo']} language must be python, javascript or typescript")
@@ -142,7 +146,7 @@ class GitHub:
             r.raise_for_status()
 
     def comment(self, repo: str, number: int, body: str) -> None:
-        self.c.post(f"/repos/{repo}/issues/{number}/comments", json={"body": body}).raise_for_status()
+        self.c.post(f"/repos/{repo}/issues/{number}/comments", json={"body": redact(body)}).raise_for_status()
 
     def ensure_labels(self, repo: str, specs: dict[str, tuple[str, str]]) -> None:
         """Create missing labels, and bring existing ones up to date (colour and description)."""

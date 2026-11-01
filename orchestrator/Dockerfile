@@ -15,6 +15,9 @@ COPY factory ./factory
 COPY migrations ./migrations
 
 RUN useradd --uid 10001 --create-home --home-dir /home/factory factory
+# Mount point of the factory-runs volume (clones, frozen tests, results). A new volume takes this
+# folder's owner, so the factory can write it. No runner ever mounts that volume.
+RUN mkdir -p /runs && chown 10001:10001 /runs
 USER 10001
 # Read-only rootfs: the bundled Claude Code CLI writes its config under $HOME, so HOME is the tmpfs.
 ENV HOME=/tmp PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1

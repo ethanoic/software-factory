@@ -102,3 +102,57 @@ DAY_CAP_USD = float(os.environ.get("DAY_CAP_USD", "10.00"))
 MAX_REPAIRS = 3
 RUN_WALL_S = 45 * 60
 LOCAL_CTX_BUDGET = 24_000
+
+
+# ------------------------------------------------------------------ redaction and self-protection
+import base64 as _b64
+import re as _re
+
+_SECRET_PATTERNS = [
+    _re.compile(r"(?i)(api[_-]?key|token|secret|password)(\s*[=:]\s*)\S+"),             # KEY=value
+    _re.compile(r"(?i)(\"[A-Za-z_]*(?:token|secret|key|password)[A-Za-z_]*\"\s*:\s*)\"[^\"]*\""),  # JSON
+    _re.compile(r"(?i)\b(bearer|basic)(\s+)[A-Za-z0-9._~+/=-]{8,}"),                       # auth headers
+    _re.compile(r"\b(sk-ant-|sk-or-|ghp_|gho_|ghs_|ghu_|github_pat_)[A-Za-z0-9_-]{6,}"),     # known prefixes
+]
+_SECRET_ENV = _re.compile(r"(?i)(key|token|secret|password|dsn)$")
+
+
+def _secret_values() -> list[str]:
+    vals = [secret("github_token"), claude_oauth_token()[0]]
+    vals += [v for k, v in os.environ.items() if _SECRET_ENV.search(k)]
+    out = set()
+    for v in vals:
+        if v and len(v) >= 8:
+            out.add(v)
+            out.add(_b64.b64encode(v.encode()).decode())
+            out.add(_b64.b64encode(f"x-access-token:{v}".encode()).decode())
+    return sorted(out, key=len, reverse=True)
+
+
+def redact(text: str) -> str:
+    """Remove secrets from text bound for a prompt, trace, comment or PR: first the literal values the
+    factory holds (and their base64 forms), then common secret shapes as a second pass."""
+    if not text:
+        return text
+    try:
+        values = _secret_values()
+    except SystemExit:                     # a malformed token file must not stop redaction
+        values = []
+    for v in values:
+        text = text.replace(v, "<redacted>")
+    for i, pat in enumerate(_SECRET_PATTERNS):
+        text = pat.sub((lambda m: f"{m.group(1)}{m.group(2)}<redacted>") if i in (0, 2)
+                       else (lambda m: f"{m.group(1)}\"<redacted>\"") if i == 1
+                       else (lambda m: f"{m.group(1)}<redacted>"), text)
+    return text
+
+
+def factory_repos() -> set[str]:
+    """The factory's own GitHub repo(s). Runs against these are refused: the factory is changed by a
+    reviewed pull request and `make up`, never by itself."""
+    raw = os.environ.get("FACTORY_SELF_REPOS", "ethanoic/software-factory")
+    return {r.strip().lower() for r in raw.split(",") if r.strip()}
+
+
+def is_factory_repo(repo: str) -> bool:
+    return repo.strip().lower() in factory_repos()

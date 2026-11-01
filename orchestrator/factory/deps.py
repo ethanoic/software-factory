@@ -15,13 +15,15 @@ class Deps:
     dsn: str
     workspace_root: pathlib.Path
     broker_url: str
+    runs_root: pathlib.Path = pathlib.Path("/runs")
     _breakers: dict = field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> "Deps":
         return cls(dsn=env("FACTORY_DB_DSN"),
                    workspace_root=pathlib.Path(os.environ.get("WORKSPACE_ROOT", "/workspace")),
-                   broker_url=env("BROKER_URL", "http://sandbox-broker:8080"))
+                   broker_url=env("BROKER_URL", "http://sandbox-broker:8080"),
+                   runs_root=pathlib.Path(os.environ.get("RUNS_ROOT", "/runs")))
 
     def breaker_for(self, run_id: str) -> Breaker:
         if run_id not in self._breakers:
@@ -33,7 +35,7 @@ class Deps:
         return TriageGateway(self.breaker_for(state["run_id"]), dict(state.get("model_pins") or {}))
 
     def run_dir(self, state) -> pathlib.Path:
-        return self.workspace_root / "runs" / state["run_id"]
+        return self.runs_root / state["run_id"]
 
     def repo_path(self, state) -> pathlib.Path:
         return self.run_dir(state) / "repo"
