@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
-from factory import patches, prompts
+from factory import depshash, patches, projects, prompts
 from factory.breaker import PatchRejected, alert
 from factory.config import is_factory_repo, redact
 from factory.gateway import Task, TaskKind
@@ -48,6 +48,18 @@ def ingest(state, deps):
     if is_factory_repo(t.repo):
         return {"halt_reason": f"refused: {t.repo} is the factory's own repo. Change the factory by "
                                "pull request and `make up`, never through a factory run."}
+    project = projects.get(deps.dsn, t.repo) if getattr(deps, "dsn", None) else None
+    if not state.get("qualification"):
+        if project is None:
+            return {"halt_reason": f"refused: {t.repo} is not a registered project. Add it with "
+                                   f"make project-add REPO={t.repo} LANGUAGE=<language>"}
+        if project.status != "active":
+            return {"halt_reason": f"refused: project {t.repo} is paused (make project-resume REPO={t.repo})"}
+        if not project.runner_image:
+            return {"halt_reason": f"sandbox environment: {t.repo} has no runner image yet. "
+                                   f"Run: make project-rebuild REPO={t.repo}"}
+        # The project record is authoritative for language and branch, whatever the ticket file says.
+        t = ticket = ticket.model_copy(update={"language": project.language, "base_branch": project.base_branch})
     repo = deps.repo_path(state)
     if not (repo / ".git").exists():
         repo.parent.mkdir(parents=True, exist_ok=True)
@@ -57,7 +69,11 @@ def ingest(state, deps):
         if r.returncode != 0:
             return {"halt_reason": "clone failed: " + r.stderr.decode(errors="replace")[-500:]}
     sha = patches.git(repo, "rev-parse", "HEAD").stdout.decode().strip()
-    return {"ticket": ticket, "base_sha": sha}
+    if project is not None and not state.get("qualification") \
+            and depshash.deps_hash(repo, project.language) != project.deps_hash:
+        return {"halt_reason": f"sandbox environment: {t.repo} dependencies changed since its runner image was "
+                               f"built. Run: make project-rebuild REPO={t.repo}, then retry"}
+    return {"ticket": ticket, "base_sha": sha, "runner_image": project.runner_image if project else None}
 
 
 # ------------------------------------------------------------------ TRIAGE (T1 -> local)
@@ -222,7 +238,8 @@ def sandbox(state, deps):
     req = {"run_id": state["run_id"], "language": state["ticket"].language,
            "source_tar_b64": base64.b64encode(source).decode(),
            "tests_tar_b64": base64.b64encode(patches.dir_archive(run_dir / "frozen")).decode(),
-           "changed_files": patches.changed_files(state["patch"].unified_diff)}
+           "changed_files": patches.changed_files(state["patch"].unified_diff),
+           "image": state.get("runner_image")}
     resp = httpx.post(f"{deps.broker_url}/run", timeout=420, json=req)
     if resp.status_code >= 400:
         return {"halt_reason": f"sandbox environment: broker refused the run ({resp.status_code} {resp.text[:300]})"}
@@ -336,7 +353,7 @@ def compile_pr(state, deps):
             "**Acceptance criteria**\n" + "\n".join(f"- {c}" for c in state["plan"].acceptance_criteria) +
             f"\n\n**Run**: `{state['run_id']}` · repairs: {state.get('repair_attempts', 0)} · "
             f"billed cost: ${spent:.4f} · models: {json.dumps(state.get('model_pins', {}))}\n"
-            f"**Trace**: {trace_url(state['run_id'])}\n")
+            + (f"**Trace**: {trace_url(state['run_id'])}\n" if trace_url(state["run_id"]) else ""))
     r = httpx.post(f"https://api.github.com/repos/{t.repo}/pulls", timeout=30,
                    headers={"Authorization": f"Bearer {deps.github_token()}",
                             "Accept": "application/vnd.github+json"},

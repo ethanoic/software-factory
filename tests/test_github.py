@@ -19,7 +19,8 @@ REPO = "acme/shop"
 def test_config_defaults_and_validation():
     cfg = validate({"repos": [{"repo": REPO}]})
     assert cfg["trigger_label"] == "factory:ready" and cfg["repos"][0]["language"] == "python"
-    for bad in ({"repos": []}, {"repos": [{"repo": "no-slash"}]}, {"repos": [{"repo": REPO, "language": "go"}]},
+    assert validate({})["poll_interval_s"] == 120                # repos are optional: projects live in the database
+    for bad in ({"repos": [{"repo": "no-slash"}]}, {"repos": [{"repo": REPO, "language": "go"}]},
                 {"repos": [{"repo": REPO}], "poll_interval_s": 10}):
         with pytest.raises(SystemExit):
             validate(bad)
@@ -115,7 +116,7 @@ def env(tmp_path):
     cfg = validate({"repos": [{"repo": REPO, "base_branch": "main", "language": "python"}]})
     inbox = tmp_path / "inbox"
     inbox.mkdir()
-    return fake, Intake(gh, cfg, DSN, inbox), inbox
+    return fake, Intake(gh, cfg, DSN, inbox, projects=lambda: cfg["repos"]), inbox
 
 
 @needs_db

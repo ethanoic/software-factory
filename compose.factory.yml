@@ -1,6 +1,6 @@
-# Factory services, layered on your existing stack (postgres + self-hosted Langfuse):
-#   docker compose -f compose.yml -f compose.factory.yml up -d --build
-# Service names `postgres` and `langfuse-web` must match your compose.yml; rename below if they differ.
+# The whole factory: one service on this computer, with its own database. Start it with `make up`.
+# Langfuse is optional and runs elsewhere (README "Optional: Langfuse"); it is off unless you turn it on.
+name: factory
 
 x-orchestrator-env: &orch_env
   FACTORY_DB_DSN: postgresql://factory:${FACTORY_DB_PASSWORD}@postgres:5432/factory
@@ -9,8 +9,9 @@ x-orchestrator-env: &orch_env
   OMLX_BASE_URL: http://host.docker.internal:8000/v1
   BROKER_URL: http://sandbox-broker:8080
   RUNS_ROOT: /runs
-  LANGFUSE_HOST: http://langfuse-web:3000
-  LANGFUSE_PUBLIC_URL: http://localhost:3000
+  LANGFUSE_DISABLED: ${LANGFUSE_DISABLED:-1}
+  LANGFUSE_HOST: ${LANGFUSE_HOST:-http://host.docker.internal:3000}
+  LANGFUSE_PUBLIC_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3000}
   RUN_CAP_USD: "2.00"
   DAY_CAP_USD: "10.00"
   FACTORY_TZ: Asia/Singapore
@@ -18,8 +19,8 @@ x-orchestrator-env: &orch_env
   HTTPS_PROXY: http://egress-proxy:8888
   http_proxy: http://egress-proxy:8888
   https_proxy: http://egress-proxy:8888
-  NO_PROXY: postgres,langfuse-web,sandbox-broker,localhost
-  no_proxy: postgres,langfuse-web,sandbox-broker,localhost
+  NO_PROXY: postgres,sandbox-broker,localhost
+  no_proxy: postgres,sandbox-broker,localhost
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"     # Agent SDK: no telemetry or update checks
 
 x-hardened: &hardened
@@ -39,6 +40,7 @@ networks:
 # (Runners get their own throwaway volumes from the broker; see sandbox_broker/app.py.)
 volumes:
   factory-runs: {}
+  factory-db: {}                   # the factory's database: runs, projects, model pool, cost ledger
 
 services:
   orchestrator:
@@ -56,7 +58,10 @@ services:
       - ./pool.yaml:/app/pool.yaml:ro
       - ./qualification:/app/qualification:ro
       - ./github.yaml:/app/github.yaml:ro
-    depends_on: [sandbox-broker, egress-proxy]
+    depends_on:
+      postgres: { condition: service_healthy }
+      sandbox-broker: { condition: service_started }
+      egress-proxy: { condition: service_started }
     mem_limit: 1g
     restart: unless-stopped
 
@@ -75,7 +80,10 @@ services:
       - ./pool.yaml:/app/pool.yaml:ro
       - ./qualification:/app/qualification:ro
       - ./github.yaml:/app/github.yaml:ro
-    depends_on: [sandbox-broker, egress-proxy]
+    depends_on:
+      postgres: { condition: service_healthy }
+      sandbox-broker: { condition: service_started }
+      egress-proxy: { condition: service_started }
     mem_limit: 768m
     restart: unless-stopped
 
@@ -126,19 +134,36 @@ services:
     environment:
       BOARD_DB_DSN: postgresql://factory_board:${FACTORY_BOARD_DB_PASSWORD}@postgres:5432/factory
       WORKSPACE_ROOT: /workspace
-      LANGFUSE_PUBLIC_URL: http://localhost:3000
+      LANGFUSE_DISABLED: ${LANGFUSE_DISABLED:-1}
+      LANGFUSE_PUBLIC_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3000}
       FACTORY_DOCS_URL: https://github.com/ethanoic/software-factory/blob/main
       FACTORY_TZ: Asia/Singapore
     volumes:
       - ./workspace/inbox:/workspace/inbox:ro
+    depends_on:
+      postgres: { condition: service_healthy }
     mem_limit: 128m
     restart: unless-stopped
 
-  # Existing services: attach them to the factory's internal data network.
-  postgres:
-    networks: [data, default]
-  langfuse-web:
-    networks: [data, default]      # default network keeps the UI on localhost:3000
+  postgres:                        # the factory's own database; reachable only on the internal data network
+    image: postgres:16.14-alpine
+    networks: [data]
+    environment:
+      POSTGRES_DB: factory
+      POSTGRES_USER: factory
+      POSTGRES_PASSWORD: ${FACTORY_DB_PASSWORD:?set FACTORY_DB_PASSWORD in .env.factory}
+      FACTORY_BOARD_DB_PASSWORD: ${FACTORY_BOARD_DB_PASSWORD:?set FACTORY_BOARD_DB_PASSWORD in .env.factory}
+    volumes:
+      - factory-db:/var/lib/postgresql/data
+      - ./orchestrator/sql/initdb:/docker-entrypoint-initdb.d:ro   # first start only: the board's read-only role
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U factory -d factory"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    shm_size: 128m
+    mem_limit: 512m
+    restart: unless-stopped
 
 secrets:
   github_token:

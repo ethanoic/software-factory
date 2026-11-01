@@ -83,4 +83,5 @@ class FactoryState(TypedDict, total=False):
     pr_url: str | None
     dry_run: bool                       # qualification runs: no push, no PR
     qualification: bool                 # skips triage; every code role pinned to the candidate
+    runner_image: str | None            # the project's runner image (set by ingest)
     attempts: Annotated[list[dict], operator.add]   # one record per repair attempt, fed back to the model

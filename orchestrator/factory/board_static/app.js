@@ -12,6 +12,14 @@ const DOING = {
 
 let lastBody = "";
 let lastOk = 0;
+let lastData = null;
+// The selected project lives in the address (?project=owner/name), so a filtered view can be bookmarked;
+// the last choice is also remembered in this browser for when the page opens without one.
+let filter = new URLSearchParams(location.search).get("project") || "";
+if (!filter) {
+  try { filter = localStorage.getItem("factory-board-project") || ""; } catch { /* storage blocked: no memory */ }
+}
+filter = filter.toLowerCase();
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -70,10 +78,67 @@ function renderVitals(health) {
   if (health.daily_limit !== null && health.daily_limit !== undefined) {
     items.push(el("span", { text: `${health.runs_left} of ${health.daily_limit} runs left today` }));
   }
-  if (health.repos && health.repos.length) {
-    items.push(el("span", { text: `Watching ${health.repos.join(", ")}` }));
-  }
   box.replaceChildren(...items);
+}
+
+// ------------------------------------------------------------------------------------------ projects
+function projectState(p) {
+  if (p.status === "paused") return { tone: "paused", text: "Paused" };
+  if (!p.ready) return { tone: "stopped", text: "No test runner yet" };
+  if (p.stopped) return { tone: "stopped", text: `${p.stopped} stopped` };
+  return { tone: "ok", text: "Ready" };
+}
+
+function renderProjects(projects) {
+  const list = document.getElementById("projects");
+  const select = document.getElementById("project-filter");
+  document.getElementById("projects-count").textContent = projects.length ? `(${projects.length})` : "";
+  document.title = filter ? `${filter} · Factory board` : "Factory board";
+  const names = projects.map((p) => p.repo);
+  if (filter && !names.includes(filter)) filter = "";
+  select.replaceChildren(el("option", { value: "", text: "All projects" }),
+    ...names.map((n) => el("option", { value: n, text: n })));
+  select.value = filter;
+  if (!projects.length) {
+    list.replaceChildren(el("li", { class: "none", text: "No projects yet. Add one: make project-add REPO=owner/name LANGUAGE=javascript" }));
+    return;
+  }
+  list.replaceChildren(...projects.map((p) => {
+    const st = projectState(p);
+    const cap = p.max_runs_per_day === null || p.max_runs_per_day === undefined ? "" : ` of ${p.max_runs_per_day}`;
+    const item = el("li", { class: `project ${st.tone}${filter === p.repo ? " selected" : ""}` },
+      el("button", { type: "button", class: "project-name", text: p.repo, "aria-pressed": String(filter === p.repo) }),
+      el("span", { class: "project-state", text: st.text }),
+      el("span", { class: "project-meta", text: `${p.open} open · ${p.runs_today}${cap} runs today · ${p.language}` }));
+    item.querySelector("button").addEventListener("click", () => setFilter(filter === p.repo ? "" : p.repo));
+    return item;
+  }));
+}
+
+function setFilter(value) {
+  filter = value;
+  try { localStorage.setItem("factory-board-project", value); } catch { /* not remembered */ }
+  const url = new URL(location.href);
+  if (value) url.searchParams.set("project", value); else url.searchParams.delete("project");
+  history.replaceState(null, "", url);
+  if (lastData) renderAll(lastData);
+}
+
+function mine(card) {
+  return !filter || (card.repo || "").toLowerCase() === filter;
+}
+
+function renderAll(data) {
+  renderProjects(data.projects || []);
+  const cards = data.cards.filter(mine);
+  const finished = data.finished.filter(mine);
+  const all = [...data.cards, ...data.finished];
+  const byId = new Map(all.map((c) => [c.id, c]));
+  // System items (start the factory, renew the token) always show; project items only for that project.
+  const actions = data.actions.filter((a) => a.card ? mine(byId.get(a.card) || {}) : !a.project || mine({ repo: a.project }));
+  renderMoves(actions, all);
+  renderLine(data.stations, cards);
+  renderFinished(finished);
 }
 
 // ------------------------------------------------------------------------------------------ your move
@@ -207,9 +272,8 @@ async function refresh() {
     renderVitals(data.health);
     if (comparable !== lastBody) {                    // re-render only on change, so focus and "Copied" survive
       lastBody = comparable;
-      renderMoves(data.actions, [...data.cards, ...data.finished]);
-      renderLine(data.stations, data.cards);
-      renderFinished(data.finished);
+      lastData = data;
+      renderAll(data);
     }
   } catch (err) {
     notice.textContent = `The board can't load its data (${err.message}). Is the factory running? Try: make up`;
@@ -219,5 +283,6 @@ async function refresh() {
     lastOk ? `Updated ${new Date(lastOk).toLocaleTimeString()}` : "Not loaded yet";
 }
 
+document.getElementById("project-filter").addEventListener("change", (e) => setFilter(e.target.value));
 refresh();
 setInterval(refresh, POLL_MS);

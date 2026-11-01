@@ -6,6 +6,7 @@
   python -m factory.runner resume  <run_id>   continue a parked run from its last checkpoint
   python -m factory.runner status             list recent runs
   python -m factory.runner clean [--days N]   delete finished runs' clones from the runs volume
+  python -m factory.runner diff <run_id>      print the change a run made (read it before approving)
 """
 from __future__ import annotations
 
@@ -70,6 +71,30 @@ def runs_today(dsn: str) -> int:
                             AND started_at > now() - interval '24 hours'""").fetchone()[0]
 
 
+def runs_today_by_repo(dsn: str) -> dict[str, int]:
+    with psycopg.connect(dsn) as c:
+        rows = c.execute("""SELECT lower(repo), count(*) FROM runs WHERE run_id NOT LIKE 'qual-%%'
+                            AND started_at > now() - interval '24 hours' GROUP BY lower(repo)""").fetchall()
+    return {r: int(n) for r, n in rows}
+
+
+def pick_next(waiting: list[tuple[pathlib.Path, str, float]], used: dict[str, int],
+              caps: dict[str, int | None]) -> pathlib.Path | None:
+    """Fair share across projects. `waiting` = (ticket file, repo, mtime) for tickets whose project can run
+    now. Projects at their own daily cap wait; among the rest, the project with the fewest runs in the
+    last 24 hours goes next (ties: the oldest ticket), and its oldest ticket is taken."""
+    by_repo: dict[str, list[tuple[float, pathlib.Path]]] = {}
+    for path, repo, mtime in waiting:
+        cap = caps.get(repo)
+        if cap is not None and used.get(repo, 0) >= cap:
+            continue
+        by_repo.setdefault(repo, []).append((mtime, path))
+    if not by_repo:
+        return None
+    repo = min(by_repo, key=lambda r: (used.get(r, 0), min(by_repo[r])[0], r))
+    return min(by_repo[repo])[1]
+
+
 def daily_limit() -> int | None:
     P = policy()
     if P["anthropic_route"] == "subscription":
@@ -110,8 +135,8 @@ def run_or_park(deps: Deps, saver, run_id: str, first_input, intake=None) -> str
                repair_attempts=snap.get("repair_attempts", 0), models=snap.get("model_pins") or None)
     if st == "awaiting_approval":
         how = "add the approve label on the issue, or " if ticket.issue_number else ""
-        alert(run_id, ticket.ticket_id, f"{ticket.ticket_id} passed tests and QA. To open the PR, {how}"
-                                        f"run: python -m factory.runner approve {run_id}")
+        alert(run_id, ticket.ticket_id, f"{ticket.ticket_id} passed tests and QA. Read the change: make diff "
+                                        f"RUN={run_id}. To open the PR, {how}run: make approve RUN={run_id}")
     elif st == "pr_open":
         print(f"[done] {ticket.ticket_id}: {detail}", flush=True)
     if intake:
@@ -137,10 +162,17 @@ def serve(deps: Deps) -> None:
     for sub in ("processing", "done", "parked", "rejected"):
         (inbox / sub).mkdir(parents=True, exist_ok=True)
     intake = intake_from_env(deps.dsn, inbox)
+    from factory import projects
+    from factory.github import config as github_config
+    moved = projects.import_from_yaml(deps.dsn, github_config())
+    if moved:
+        print(f"[serve] moved {', '.join(moved)} from github.yaml into projects; build their runner images "
+              f"with make project-rebuild REPO=...", flush=True)
     with PostgresSaver.from_conn_string(deps.dsn) as saver:
         saver.setup()
-        repos = ", ".join(r["repo"] for r in intake.cfg["repos"]) if intake else "none (inbox only)"
-        print(f"[serve] watching {inbox}; GitHub intake: {repos}", flush=True)
+        ready = [p.repo for p in projects.ready(deps.dsn)]
+        print(f"[serve] watching {inbox}; ready projects: {', '.join(ready) or 'none'}; "
+              f"GitHub intake: {'on' if intake else 'off (inbox only)'}", flush=True)
         last_token_check = last_roles_check = 0.0
         token_warning, missing = None, []
         while True:
@@ -156,15 +188,16 @@ def serve(deps: Deps) -> None:
             heartbeat(deps.dsn, {"runs_today": runs_today(deps.dsn), "daily_limit": limit,
                                  "token_warning": token_warning, "missing_roles": missing,
                                  "local_mode": policy().get("local_mode"),
-                                 "intake_repos": [r["repo"] for r in intake.cfg["repos"]] if intake else []})
+                                 "intake_repos": [p.repo for p in projects.ready(deps.dsn)] if intake else []})
             if intake and intake.due():
                 intake.poll()
                 for run_id in intake.approvals():
                     run_or_park(deps, saver, run_id, None, intake)
             _retry_parked(deps, saver, inbox, intake)
-            tickets = sorted(inbox.glob("*.json"), key=lambda p: p.stat().st_mtime)
-            if tickets and (limit is None or runs_today(deps.dsn) < limit):
-                f = tickets[0]
+            f = None
+            if limit is None or runs_today(deps.dsn) < limit:
+                f = _next_ticket(deps, inbox, intake)
+            if f is not None:
                 moved = inbox / "processing" / f.name
                 shutil.move(f, moved)
                 try:
@@ -179,6 +212,34 @@ def serve(deps: Deps) -> None:
                 (inbox / dest / f"{run_id}.json").write_text(json.dumps(meta))
                 moved.unlink(missing_ok=True)
             time.sleep(POLL_S)
+
+
+def _next_ticket(deps: Deps, inbox: pathlib.Path, intake=None) -> pathlib.Path | None:
+    """The inbox ticket to run next, or None. Tickets for unregistered repos are rejected here, before a
+    run starts; tickets for paused projects, or projects without a runner image yet, wait in the inbox."""
+    from factory import projects
+    known = {p.repo: p for p in projects.list_all(deps.dsn)}
+    waiting = []
+    for f in inbox.glob("*.json"):
+        try:
+            data = json.loads(f.read_text())
+            repo = str(data.get("repo", "")).lower()
+        except (OSError, ValueError, AttributeError):
+            return f                                   # malformed: the caller moves it to rejected/
+        p = known.get(repo)
+        if p is None:
+            reason = f"{repo or 'no repo'} is not a registered project (make project-add REPO=owner/name LANGUAGE=...)"
+            print(f"[serve] rejected {f.name}: {reason}", flush=True)
+            shutil.move(f, inbox / "rejected" / f.name)
+            if intake and data.get("issue_number"):
+                try:
+                    intake.report(TicketSpec(**data), "-", "rejected", reason)
+                except Exception as e:                  # never let reporting stop the loop
+                    print(f"[serve] could not report rejection: {e}", flush=True)
+            continue
+        if p.ready:
+            waiting.append((f, repo, f.stat().st_mtime))
+    return pick_next(waiting, runs_today_by_repo(deps.dsn), {r: p.max_runs_per_day for r, p in known.items()})
 
 
 def _retry_parked(deps: Deps, saver, inbox: pathlib.Path, intake=None) -> None:
@@ -234,7 +295,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("migrate")
     sub.add_parser("clean").add_argument("--days", type=int, default=14)
     p_run = sub.add_parser("run"); p_run.add_argument("ticket_file")
-    for name in ("approve", "resume"):
+    for name in ("approve", "resume", "diff"):
         sub.add_parser(name).add_argument("run_id")
     a = ap.parse_args(argv)
 
@@ -257,6 +318,16 @@ def main(argv: list[str] | None = None) -> None:
     intake = intake_from_env(deps.dsn, deps.workspace_root / "inbox")
     with PostgresSaver.from_conn_string(deps.dsn) as saver:
         saver.setup()
+        if a.cmd == "diff":
+            snap = compile_app(deps, saver).get_state(config_for(a.run_id)).values
+            if not snap.get("patch"):
+                sys.exit(f"no change recorded for {a.run_id} (unknown run, or it stopped before writing code)")
+            t = snap["ticket"]
+            print(f"# {a.run_id} · {t.repo} · {t.ticket_id}: {t.title}\n"
+                  f"# repairs: {snap.get('repair_attempts', 0)} · tests passed: "
+                  f"{getattr(snap.get('sandbox'), 'passed', '?')}\n")
+            print(snap["patch"].unified_diff, end="")
+            return
         if a.cmd == "run":
             limit = daily_limit()
             if limit is not None and runs_today(deps.dsn) >= limit:

@@ -16,6 +16,16 @@
   <p class="notice" id="notice" hidden></p>
 
   <main>
+    <section class="projects" aria-labelledby="projects-title">
+      <div class="projects-head">
+        <h2 id="projects-title">Projects <span class="count" id="projects-count"></span></h2>
+        <label class="filter">Show
+          <select id="project-filter"><option value="">All projects</option></select>
+        </label>
+      </div>
+      <ul class="project-list" id="projects"></ul>
+    </section>
+
     <section class="moves" aria-labelledby="moves-title">
       <h2 id="moves-title">Your move <span class="count" id="moves-count"></span></h2>
       <ol class="move-list" id="moves"></ol>

@@ -62,7 +62,7 @@ def safe_github_url(url: str | None) -> str | None:
 def trace_link(run_id: str) -> str | None:
     try:
         from factory.obs import trace_url
-        return trace_url(run_id)
+        return trace_url(run_id) or None
     except Exception:
         return None
 
@@ -79,6 +79,8 @@ def retry_step(card: dict) -> dict:
     return step("Drop the ticket file into workspace/inbox again to rerun it.")
 
 
+REPO_NAME = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
 # (pattern in the halt reason, why it stopped, steps to fix it before retrying)
 HALT_RULES = [
     (r"no qualified model", "No model is approved for one of the steps.",
@@ -90,15 +92,26 @@ HALT_RULES = [
      [step("Make the acceptance criteria more concrete (input and expected output), or split the ticket.")]),
     (r"wall clock", "The run took longer than 45 minutes.",
      [step("Split the ticket into smaller changes.")]),
+    (r"dependencies changed since its runner image", "The repo's dependencies changed since its test runner was built.",
+     [step("Rebuild this project's runner image, then retry.", command="make project-rebuild REPO=<owner/name>")]),
+    (r"has no runner image", "This project's test runner has not been built yet.",
+     [step("Build it, then retry.", command="make project-rebuild REPO=<owner/name>")]),
+    (r"not a registered project", "The ticket names a repo the factory does not work on.",
+     [step("If you want the factory to work on it, add it as a project:",
+           command="make project-add REPO=<owner/name> LANGUAGE=<python|javascript|typescript>")]),
+    (r"project .* is paused", "The project is paused, so its tickets do not run.",
+     [step("Resume it, then retry:", command="make project-resume REPO=<owner/name>")]),
+    (r"broker refused the run", "The sandbox refused the source: something other than plain files, or too large.",
+     [step("Read the reason above. See \"When something goes wrong\" in the README.")]),
     (r"sandbox environment", "The test runner is missing a tool or dependency, or found no tests.",
-     [step("Rebuild the runner image with the target repo's dependencies.",
-           command="make runner-ts DEPS=<path to repo>   # or make runner-py")]),
+     [step("Rebuild this project's runner image with its current dependencies.",
+           command="make project-rebuild REPO=<owner/name>")]),
     (r"sandbox tamper", "The frozen acceptance tests changed during the run.",
      [step("Look at the trace before retrying: something wrote to the tests the factory is not allowed to change.")]),
     (r"plan invalid", "The planning step returned something unusable.",
      [step("Retry once. If it repeats, simplify the ticket.")]),
     (r"clone failed", "The factory could not clone the repository.",
-     [step("Check the repo name in github.yaml and that the token in secrets/github_token can read it.")]),
+     [step("Check the project's repo and branch (make project-list) and that the token in secrets/github_token can read it.")]),
     (r"git \w+ failed|PR creation failed", "Pushing the branch or opening the PR failed.",
      [step("Check the GitHub token has Contents and Pull requests write access to this repo.")]),
     (r"context too small|local backend unavailable", "No model could take this ticket's size, or the local model was down.",
@@ -106,9 +119,12 @@ HALT_RULES = [
 ]
 
 
-def halt_help(detail: str) -> tuple[str, list[dict]]:
+def halt_help(detail: str, repo: str | None = None) -> tuple[str, list[dict]]:
     for pattern, why, steps in HALT_RULES:
         if re.search(pattern, detail or "", re.I):
+            if repo and REPO_NAME.fullmatch(repo):          # fill in the project, so the command can be copied as is
+                steps = [{**s, "command": s["command"].replace("<owner/name>", repo)} if "command" in s else s
+                         for s in steps]
             return why, steps
     return "It stopped for a reason the board doesn't recognise.", [step("Read the reason and the trace.")]
 
@@ -119,8 +135,10 @@ def card_action(card: dict) -> dict | None:
         repairs = card["repair_attempts"]
         why = ("The new tests and the security scan passed"
                + (f" after {repairs} repair{'s' if repairs != 1 else ''}." if repairs else " on the first try."))
-        steps = [step("Read what it did in the trace if you want to check first.", url=card["trace_url"],
-                      url_label="Open trace")] if card["trace_url"] else []
+        steps = [step("Read the exact change first. Tests passing does not prove the code is safe.",
+                      command=f"make diff RUN={card['id']}")]
+        if card["trace_url"]:
+            steps.append(step("Or read it in the trace.", url=card["trace_url"], url_label="Open trace"))
         if card["issue_url"]:
             steps.append(step("Add the factory:approve label to open the draft PR.",
                               url=card["issue_url"], url_label=f"Open issue #{card['number']}"))
@@ -137,7 +155,7 @@ def card_action(card: dict) -> dict | None:
         return {"tone": "yours", "rank": 4, "title": f"Review and merge the PR for {ref}",
                 "why": "The draft PR is open and waiting for you.", "steps": steps}
     if status == "halted":
-        why, steps = halt_help(card["detail"])
+        why, steps = halt_help(card["detail"], card.get("repo"))
         steps = [*steps, retry_step(card)]
         if card["trace_url"]:
             steps.insert(0, step("See exactly where it stopped.", url=card["trace_url"], url_label="Open trace"))
@@ -168,6 +186,20 @@ def system_actions(health: dict | None, health_age: float | None, docs: str = DO
                     "title": "Renew the Claude token", "why": health["token_warning"].split(". On the Mac")[0] + ".",
                     "steps": [step("On the Mac, in the factory folder:", command="make claude-token")]})
     return out
+
+
+def project_actions(projects: list[dict], online: bool) -> list[dict]:
+    if not online:
+        return []
+    if not projects:
+        return [{"tone": "yours", "rank": 1, "title": "Add your first project",
+                 "why": "The factory works only on repos you add as projects, and none are added yet.",
+                 "steps": [step("Add the repo; this also builds its test runner:",
+                                command="make project-add REPO=<owner/name> LANGUAGE=<python|javascript|typescript>")]}]
+    return [{"tone": "stopped", "rank": 1, "title": f"Build the runner for {p['repo']}", "project": p["repo"],
+             "why": "This project has no test runner yet, so its tickets wait in the queue.",
+             "steps": [step("Build it:", command=f"make project-rebuild REPO={p['repo']}")]}
+            for p in projects if not p["ready"] and p["status"] == "active"]
 
 
 # ---------------------------------------------------------------------------------------------- board
@@ -219,6 +251,11 @@ def build_board(dsn: str, inbox: pathlib.Path, now: float | None = None) -> dict
         h = c.execute("SELECT data, extract(epoch FROM now() - last_seen) FROM factory_health WHERE id = 1").fetchone()
         unauthorized = c.execute("""SELECT repo, number FROM github_issues WHERE status = 'unauthorized'
                                     AND updated_at > now() - interval '7 days' ORDER BY updated_at DESC""").fetchall()
+        project_rows = c.execute("""
+            SELECT p.repo, p.status, p.language, p.max_runs_per_day, p.runner_image, p.image_built_at,
+                   (SELECT count(*) FROM runs r WHERE lower(r.repo) = p.repo AND r.run_id NOT LIKE 'qual-%%'
+                      AND r.started_at > now() - interval '24 hours')
+            FROM projects p ORDER BY p.repo""").fetchall()
     health, health_age = (h[0], float(h[1])) if h else (None, None)
     parked = parked_meta(inbox)
 
@@ -248,12 +285,20 @@ def build_board(dsn: str, inbox: pathlib.Path, now: float | None = None) -> dict
         cards.append(card)
 
     # With one repo watched, "#7" is clearer than "owner/repo#7"; the full name returns with several repos.
-    repos = {c["repo"] for c in cards} | set((health or {}).get("intake_repos", []))
+    repos = {c["repo"].lower() for c in cards} | {r[0] for r in project_rows}
     for c in cards:
         c["ref"] = (f"#{c['number']}" if len(repos) <= 1 else f"{c['repo']}#{c['number']}") \
             if c["number"] else c["ticket_id"]
 
-    actions = system_actions(health, health_age)
+    projects = []
+    for repo, pstatus, lang, cap, image, built, used_today in project_rows:
+        mine = [c for c in cards if c["repo"].lower() == repo]
+        projects.append({"repo": repo, "status": pstatus, "language": lang, "ready": bool(image),
+                         "runner_image": image, "image_built_at": _iso(built), "runs_today": int(used_today),
+                         "max_runs_per_day": cap, "open": sum(c["station"] != "finished" for c in mine),
+                         "stopped": sum(c["status"] == "halted" for c in mine)})
+
+    actions = system_actions(health, health_age) + project_actions(projects, health is not None)
     for card in cards:
         a = card_action(card)
         if a:
@@ -278,6 +323,7 @@ def build_board(dsn: str, inbox: pathlib.Path, now: float | None = None) -> dict
                    "runs_left": None if limit is None else max(0, limit - used),
                    "repos": (health or {}).get("intake_repos", [])},
         "stations": [{"id": sid, "name": name} for sid, name, _ in STATIONS],
+        "projects": projects,
         "actions": actions,
         "cards": [c for c in cards if c["station"] != "finished"],
         "finished": [c for c in cards if c["station"] == "finished"],

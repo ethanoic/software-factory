@@ -1,20 +1,32 @@
-# AI Software Factory — run from the folder that also holds your existing compose.yml.
-# Both env files feed ${VAR} substitution in the compose files (.env.factory holds the factory's passwords;
-# compose reads only .env by default, which left FACTORY_DB_PASSWORD empty).
-ENV_FILES = $(if $(wildcard .env),--env-file .env) $(if $(wildcard .env.factory),--env-file .env.factory)
-COMPOSE = docker compose $(ENV_FILES) -f compose.yml -f compose.factory.yml
+# AI Software Factory — one service on this computer, with its own database. Run make from this folder.
+# .env.factory feeds ${VAR} substitution in compose.factory.yml (compose reads only .env by default).
+ENV_FILES = $(if $(wildcard .env.factory),--env-file .env.factory)
+COMPOSE = docker compose $(ENV_FILES) -f compose.factory.yml
+export COMPOSE
 # DEPS: path to a target repo, for building its runner image
 DEPS ?=
 # OMLX_MODELS: where your omlx server keeps MLX model folders
 OMLX_MODELS ?= $(HOME)/models/mlx
 PY ?= python3
 
-.PHONY: help init lock db hoststat runner-py runner-ts up down logs test test-sandbox sandbox-check runs-clean check status approve pool claude-token claude-token-paste claude-token-check board db-board
+.PHONY: help init lock db hoststat runner-py runner-ts up down logs test test-sandbox sandbox-check runs-clean check status approve diff pool claude-token claude-token-paste claude-token-check board db-board backup restore project-add project-list project-rebuild project-rebuild-all project-pause project-resume project-limit project-labelers project-remove
 
 help:
-	@echo "init      create folders, secrets placeholder, .env.factory"
+	@echo "init      create folders, secrets placeholder, .env.factory (with generated database passwords)"
 	@echo "lock      generate hashed lockfiles (needs uv)"
-	@echo "db        create the factory database and role in your postgres"
+	@echo ""
+	@echo "Projects (the repos the factory works on):"
+	@echo "project-add REPO=owner/name LANGUAGE=python|javascript|typescript [BRANCH=main] [MAX_RUNS=n]"
+	@echo "project-list                    every project, its state and runner image"
+	@echo "project-rebuild REPO=...        rebuild a project's runner image (after its dependencies change)"
+	@echo "project-rebuild-all             rebuild every project's image (after updating the factory)"
+	@echo "project-pause / project-resume REPO=...   stop or restart taking its tickets"
+	@echo "project-limit REPO=... N=2|none at most N runs a day for this project"
+	@echo "project-labelers REPO=... LOGINS='a b'    extra GitHub logins allowed to label its issues"
+	@echo "project-remove REPO=...         forget a project (its history stays)"
+	@echo ""
+	@echo "diff RUN=<run_id>      print the change a run made; read it before you approve"
+	@echo "backup / restore FILE=...      dump or restore the factory's database"
 	@echo "hoststat  install the macOS memory sensor (launchd)"
 	@echo "runner-py DEPS=<repo>  build the Python runner image with that repo's deps"
 	@echo "runner-ts DEPS=<repo>  build the Node (JavaScript or TypeScript) runner image with that repo's deps"
@@ -27,11 +39,13 @@ help:
 	@echo "claude-token           get a Claude plan token with your current login (claude setup-token)"
 	@echo "claude-token-check     show the stored token's expiry and test it from the factory"
 	@echo "board                  open the factory board (what is where, and what needs you)"
-	@echo "db-board               create the board's read-only database role (once)"
+	@echo "db-board               recreate the board's read-only database role (new databases get it automatically)"
 
 init:
-	mkdir -p workspace/inbox hoststat secrets qualification/code qualification/triage
-	@[ -f .env.factory ] || (cp .env.factory.example .env.factory && chmod 600 .env.factory && echo "created .env.factory")
+	mkdir -p workspace/inbox hoststat secrets qualification/code qualification/triage backups
+	@[ -f .env.factory ] || (sed -e "s/^FACTORY_DB_PASSWORD=.*/FACTORY_DB_PASSWORD=$$(openssl rand -hex 24)/" \
+	  -e "s/^FACTORY_BOARD_DB_PASSWORD=.*/FACTORY_BOARD_DB_PASSWORD=$$(openssl rand -hex 24)/" \
+	  .env.factory.example > .env.factory && chmod 600 .env.factory && echo "created .env.factory (database passwords generated)")
 	@[ -f secrets/github_token ] || (touch secrets/github_token && chmod 600 secrets/github_token && echo "put a fine-grained GitHub token in secrets/github_token")
 	@[ -f secrets/claude_oauth_token ] || (touch secrets/claude_oauth_token && chmod 600 secrets/claude_oauth_token && echo "run make claude-token to store your Claude plan token")
 
@@ -42,9 +56,7 @@ lock:
 	  --python-platform aarch64-unknown-linux-gnu -o requirements.lock
 
 db:
-	@. ./.env.factory; \
-	printf "CREATE ROLE factory LOGIN PASSWORD '%s';\nCREATE DATABASE factory OWNER factory;\n" "$$FACTORY_DB_PASSWORD" \
-	  | $(COMPOSE) exec -T postgres sh -c 'psql -U "$$POSTGRES_USER" -d postgres'
+	@echo "Nothing to do: the factory now has its own database, created by make up on first start."
 
 hoststat:
 	chmod 755 hoststat/hoststat.sh
@@ -68,7 +80,7 @@ runner-ts:
 	-cp $(DEPS)/package.json $(DEPS)/package-lock.json build/runner-ts/deps/ 2>/dev/null
 	docker build -t factory-runner-ts:locked build/runner-ts
 
-SERVICES = orchestrator pool-worker sandbox-broker docker-proxy egress-proxy board
+SERVICES = postgres orchestrator pool-worker sandbox-broker docker-proxy egress-proxy board
 
 up:
 	$(COMPOSE) up -d --build $(SERVICES)
@@ -113,6 +125,44 @@ pool:
 approve:
 	@test -n "$(RUN)" || (echo "usage: make approve RUN=<run_id>" && exit 1)
 	$(COMPOSE) exec orchestrator python -m factory.runner approve $(RUN)
+
+diff:
+	@test -n "$(RUN)" || (echo "usage: make diff RUN=<run_id>" && exit 1)
+	@$(COMPOSE) exec -T orchestrator python -m factory.runner diff $(RUN)
+
+# ---------------------------------------------------------------- projects
+project-add:
+	@scripts/project.sh add "$(REPO)" "$(LANGUAGE)" "$(or $(BRANCH),main)" "$(MAX_RUNS)"
+project-rebuild:
+	@scripts/project.sh rebuild "$(REPO)"
+project-rebuild-all:
+	@scripts/project.sh rebuild-all
+project-list:
+	@$(COMPOSE) exec -T orchestrator python -m factory.projects list
+project-pause:
+	@$(COMPOSE) exec -T orchestrator python -m factory.projects pause "$(REPO)"
+project-resume:
+	@$(COMPOSE) exec -T orchestrator python -m factory.projects resume "$(REPO)"
+project-limit:
+	@$(COMPOSE) exec -T orchestrator python -m factory.projects limit "$(REPO)" "$(N)"
+project-labelers:
+	@$(COMPOSE) exec -T orchestrator python -m factory.projects labelers "$(REPO)" $(LOGINS)
+project-remove:
+	@$(COMPOSE) exec -T orchestrator python -m factory.projects remove "$(REPO)"
+
+# ---------------------------------------------------------------- the factory's database
+backup:
+	@mkdir -p backups
+	@f=backups/factory-$$(date +%Y%m%d-%H%M%S).sql.gz; \
+	$(COMPOSE) exec -T postgres pg_dump -U factory -d factory --clean --if-exists | gzip > $$f && \
+	chmod 600 $$f && echo "saved $$f"
+
+restore:
+	@test -f "$(FILE)" || (echo "usage: make restore FILE=backups/factory-<date>.sql.gz" && exit 1)
+	@echo "This replaces the factory's database with $(FILE). Stopping the factory first."
+	$(COMPOSE) stop orchestrator pool-worker board
+	gunzip -c "$(FILE)" | $(COMPOSE) exec -T postgres psql -q -v ON_ERROR_STOP=1 -U factory -d factory
+	$(COMPOSE) start orchestrator pool-worker board
 
 test:
 	cd orchestrator && POOL_FILE=../pool.yaml LANGFUSE_DISABLED=1 $(PY) -m pytest -q ../tests
