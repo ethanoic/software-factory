@@ -48,8 +48,8 @@ the sample Node.js app in `examples/hello-node` from a GitHub issue to a merged 
 | D6 | Model evals ≤ US$70/month billed (≈ SGD 90); Claude evals on Pro cost $0 but use plan limits |
 | D7 | 3 repairs max; US$2/run and US$10/day for billed calls; 4 runs/day on Pro; 45 min per run |
 | D8 | Sealed runner: no network, no shared folders, no `.git`, no tokens; code goes in and results come out as archives through the broker. Only `docker-proxy` holds the Docker socket. The factory never works on its own repo. Egress allowlist; hashed lockfiles |
-| D9 | GitHub Issues polled every 2 min per repo in `github.yaml`; only issues a maintainer labels `factory:ready`; status written back as labels and comments. JSON files in `workspace/inbox/` stay as a fallback |
-| D10 | Self-hosted Langfuse: one trace per run, explicit cost, `savings_usd` at list price |
+| D9 | Many projects, one operator: each project is a row in the factory's database with its own runner image, daily cap and labelers; projects take turns. GitHub Issues polled every 2 min per project; only issues a maintainer labels `factory:ready`; status written back as labels and comments. `workspace/inbox/` stays as a fallback |
+| D10 | The factory has its own Postgres. Langfuse is optional: one trace per run, explicit cost, `savings_usd` at list price |
 
 **Upgrade trigger (D3/D4):** if runs park on Pro limits more than twice a week, or the factory blocks
 your own coding, move to Max 5x, claim its US$100/month API credit into a Console organization, set
@@ -57,37 +57,91 @@ your own coding, move to Max 5x, claim its US$100/month API credit into a Consol
 
 ## Setup (Phase 0)
 
-Run everything from the folder that holds your existing `compose.yml` (postgres + Langfuse). Copy this
-repo's files next to it.
+The factory is one service on your Mac with its own database. Clone this repo, then:
 
 1. **Docker Desktop**: Settings → Resources → Memory 10 GB, swap 1 GB, CPUs 6. File sharing: remove
    `/Users`, add only this folder (rule R1). Runners never use file sharing; only the factory's own
    services read this folder (inbox, config, secrets). If you turn on Enhanced Container Isolation,
    allow the `tecnativa/docker-socket-proxy` image to mount the Docker socket, or `docker-proxy` cannot start.
-2. `make init` — creates `workspace/`, `secrets/`, `.env.factory` (chmod 600).
+2. `make init` — creates `workspace/`, `secrets/`, `backups/` and `.env.factory` (chmod 600) with random
+   passwords for the factory's database.
 3. **Claude Pro token**: `make claude-token` (see "Claude plan token" below). It uses your current
    claude.ai login and stores a one-year token in `secrets/claude_oauth_token`. Keep `ANTHROPIC_API_KEY`
    and `ANTHROPIC_AUTH_TOKEN` unset.
-4. **GitHub**: create a fine-grained token limited to the repos in `github.yaml`, with *Contents*,
+4. **GitHub token**: create a fine-grained token for the repos the factory will work on, with *Contents*,
    *Pull requests* and *Issues*: read/write, and *Metadata*: read. Save it to `secrets/github_token`.
-   Protect `main` (rule R9). Then list your repos in `github.yaml` (see "GitHub intake" below).
-5. **Langfuse**: create a project, put its keys in `.env.factory`.
-6. **Postgres**: set `FACTORY_DB_PASSWORD` and `FACTORY_BOARD_DB_PASSWORD` in `.env.factory`, then
-   `make db`, then `make db-board` (the board's read-only role). If your services are not named
-   `postgres` and `langfuse-web`, rename them at the bottom of `compose.factory.yml`.
-7. **Local model**: install a 4–8B instruct model with an MLX 4-bit build into your omlx models folder
-   (one folder per model, folder name = the alias omlx serves). Bind omlx to `127.0.0.1:8000`.
-8. `make hoststat OMLX_MODELS=/path/to/your/mlx/models` — installs the launchd memory sensor.
-9. `make lock` (needs [uv](https://docs.astral.sh/uv/)) — writes hashed lockfiles. The images refuse to
+   Protect each repo's `main` (rule R9). Adding a repo later means adding it to this token too.
+5. **Local model** (optional, for triage): install a 4–8B instruct model with an MLX 4-bit build into
+   your omlx models folder, bind omlx to `127.0.0.1:8000`, then `make hoststat OMLX_MODELS=/path/to/models`.
+   Without one, set `local_mode: off` in `pool.yaml`.
+6. `make lock` (needs [uv](https://docs.astral.sh/uv/)) — writes hashed lockfiles. The images refuse to
    build without them.
-10. `make runner-py DEPS=/path/to/target-repo` (or `runner-ts`) — bakes the target repo's dependencies
-    into the runner image, because the runner has no network.
-11. `make test-sandbox` — builds a test-only runner and proves, against your Docker, that runners are
-    sealed (see "Isolation" below). Needs `pip install docker fastapi httpx` in the Python you use for
-    `make test`. Do not go on until it passes.
-12. `make up`, then `make logs`.
-13. `make board` opens the factory board at http://localhost:8090. Keep it open: it lists what needs
-    you and where every ticket is (see "Factory board" below).
+7. `make test-sandbox` — proves, against your Docker, that runners are sealed (see "Isolation" below).
+   Needs `pip install docker fastapi httpx` in the Python you use for `make test`. Do not go on until it
+   passes.
+8. `make up` — starts the factory and its database (created on the first start), then `make logs`.
+9. **Add your first project**: `make project-add REPO=owner/name LANGUAGE=javascript` (see "Projects").
+10. **Approve a model**: `make pool ARGS="refresh"`, then `make pool ARGS="trust <model_id>"` (see
+    "Qualify before the first ticket").
+11. `make board` opens the factory board at http://localhost:8090. Keep it open: it lists what needs
+    you and where every ticket is in every project (see "Factory board" below).
+
+Langfuse traces are optional; see "Optional: Langfuse" below.
+
+## Projects
+
+A project is a GitHub repo the factory works on. Projects live in the factory's database, and the
+factory refuses tickets for any repo that is not one, so a stray ticket file or a typo cannot point it
+at the wrong code.
+
+| Command | What it does |
+| --- | --- |
+| `make project-add REPO=owner/name LANGUAGE=javascript [BRANCH=main] [MAX_RUNS=2]` | Registers the repo, then builds its test runner. Languages: `python`, `javascript`, `typescript`. |
+| `make project-list` | Every project: active or paused, language, branch, daily cap, runner image |
+| `make project-rebuild REPO=owner/name` | Rebuilds the runner from the repo's current dependency files |
+| `make project-rebuild-all` | Rebuilds every project's runner; do this after updating the factory |
+| `make project-pause REPO=…` / `make project-resume REPO=…` | Stops or restarts taking that project's tickets; queued tickets wait |
+| `make project-limit REPO=… N=2` (or `N=none`) | At most N runs a day for this project |
+| `make project-labelers REPO=… LOGINS='alice bob'` | Extra GitHub logins allowed to label this project's issues |
+| `make project-remove REPO=…` | Forgets the project; its run history stays on the board |
+
+**Each project has its own test runner.** `project-add` and `project-rebuild` ask the factory to clone
+the repo (inside its container, with git hooks off). The factory hands back only the dependency files
+(`package.json` and `package-lock.json`, or `requirements*.txt`). An image named
+`factory-runner-<project>:<hash of those files>` is built from them, so two Node projects never share
+packages.
+
+**Dependency changes are caught before any model call.** Every run starts by hashing the repo's
+dependency files. If they differ from what the runner was built with, the run stops with
+`dependencies changed since its runner image was built` and the exact `make project-rebuild` command.
+The board shows the same command.
+
+**Projects take turns.** The factory runs one ticket at a time. When several projects have tickets
+waiting, the one with the fewest runs in the last 24 hours goes next (ties: the oldest ticket). A
+project at its own daily cap waits while others continue. The overall Claude plan limit
+(`max_factory_runs_per_day` in `pool.yaml`) still applies on top.
+
+**What stays shared:** your Claude token, the model pool (qualified models serve every project), the
+GitHub token, and the cost caps per run and per day.
+
+**Moving from an older setup:** repos still listed under `repos:` in `github.yaml` become projects on
+the next `make up`. Build their runners with `make project-rebuild-all`, then delete the `repos:` list.
+
+## The factory's database
+
+Postgres runs inside the factory (`postgres` service, `factory-db` volume). It is reachable only on the
+factory's internal network, never from your Mac's ports. It holds runs, projects, the model pool, the
+cost ledger and GitHub issue status. It is created on the first `make up`, and its tables are updated
+automatically when the factory starts.
+
+| Command | What it does |
+| --- | --- |
+| `make backup` | Writes `backups/factory-<date>.sql.gz` (mode 600) |
+| `make restore FILE=backups/…` | Stops the factory, replaces the database with that backup, starts it again |
+| `make diff RUN=<run_id>` | Prints the change a run made, from the database; read it before you approve |
+
+Back up before updating the factory. `docker compose down -v` deletes the database volume; `make down`
+does not.
 
 ## Claude plan token
 
@@ -137,8 +191,9 @@ Code-suite qualification runs on your Pro limits. Run it in the evening, not whi
 
 ## GitHub intake
 
-Configure in `github.yaml`: the repos to watch (`owner/name`, base branch, language), the poll
-interval (default 120 s, minimum 60), the two labels, and who may apply them.
+The factory polls every active project that has a runner (see "Projects"). `github.yaml` holds the
+settings shared by all of them: the poll interval (default 120 s, minimum 60), the two labels, and who
+may apply them. `make project-labelers` adds people for one project only.
 
 **The labels explain themselves.** The factory creates its labels on each repo the first time it polls,
 and keeps their colours and descriptions up to date. GitHub shows each description under the label name
@@ -174,11 +229,31 @@ and is ignored, so strangers filing issues cannot spend your Claude plan.
 | Add `factory:approve` | Opens the draft PR (`Closes #n`), sets `factory:pr-open` |
 | Re-add `factory:ready` to a finished issue | Starts a fresh run |
 
-Set `enabled: false` in `github.yaml` to run on the inbox folder only.
+Set `enabled: false` in `github.yaml` to run on the inbox folder only. Inbox tickets must name a
+registered project in `repo`; others are moved to `workspace/inbox/rejected/`.
+
+## Optional: Langfuse
+
+Off by default: the factory runs fully without it, and `make diff` shows each run's change. To see a
+trace per run (every model call, token counts, cost), run Langfuse yourself, for example its own Docker
+Compose setup, then set these in `.env.factory` and run `make up` again:
+
+```bash
+LANGFUSE_DISABLED=0
+LANGFUSE_HOST=http://host.docker.internal:3000      # where the factory reaches it
+LANGFUSE_PUBLIC_URL=http://localhost:3000           # where your browser opens traces
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+```
+
+Langfuse keeps the full prompts, including issue text and source files. Keep it on this Mac.
 
 ## Factory board
 
 `make board` opens **http://localhost:8090**: where every ticket is, and what you need to do next.
+
+- **Projects** lists each project: ready, stopped tickets, no runner yet, or paused, with its runs today.
+  Click a project, or use *Show*, to see only its tickets; system items stay visible either way.
 
 - **Your move** lists everything waiting on you, most urgent first: start the factory, approve a model,
   fix and retry a stopped ticket, approve a passed ticket, review and merge a PR, renew the Claude token.
@@ -256,7 +331,7 @@ the factory refuses to work on its own repo, so a run can never change the facto
 | Halt: `refused: … is the factory's own repo` | A ticket pointed at the factory itself | Expected. Change the factory by pull request instead. |
 | `make sandbox-check` lists containers or volumes when nothing is running | The broker stopped mid-run (crash, `make down`, Docker restart) | `docker rm -f $(docker ps -aq --filter label=factory.run_id)` then `docker volume rm $(docker volume ls -q --filter label=factory.run_id)`. A retry of the same run also cleans up after itself. |
 | `docker-proxy` restarts in a loop, or runs halt with a broker error 500 | The proxy cannot reach the Docker socket | Docker Desktop → Settings → Advanced → allow the default Docker socket. If Enhanced Container Isolation is on, allow the `tecnativa/docker-socket-proxy` image to mount the socket, or turn it off. |
-| A run halts because a package is missing | The runner has no network, so dependencies come only from the image | Add the package to the target repo, then `make runner-py DEPS=…` or `make runner-ts DEPS=…` and retry |
+| A run halts because a package is missing | The runner has no network, so dependencies come only from the image | Add the package to the target repo, then `make project-rebuild REPO=owner/name` and retry |
 
 ### If you think a run did something it should not
 
@@ -282,8 +357,11 @@ The sealed runner closes the review's two critical findings (F1 and F2). Three g
 ## Daily use
 
 - Open the board (`make board`) to see what needs you.
-- Label issues `factory:ready` on GitHub, or drop a ticket JSON into `workspace/inbox/`
+- Label issues `factory:ready` on any project's repo, or drop a ticket JSON into `workspace/inbox/`
   (format in `workspace/inbox/README.md`).
+- Before approving, read the change: `make diff RUN=<run_id>` (the board gives the command).
+- When a project adds or changes a dependency: `make project-rebuild REPO=owner/name`.
+- Weekly: `make backup`.
 - The factory alerts when a run **passes** (approve with the `factory:approve` label or
   `make approve RUN=<run_id>`), **halts** (reason + Langfuse trace link), or **parks** on plan limits
   (it retries hourly, up to 6 times).
@@ -320,7 +398,7 @@ These need the running stack and are checked by hand in Phase 1:
 
 ## What has been tested, and what has not
 
-Tested in this build (`make test`, 114 tests with `FACTORY_TEST_DSN` set and Docker running; 30 need
+Tested in this build (`make test`, 131 tests with `FACTORY_TEST_DSN` set and Docker running; 38 need
 Postgres and 1 needs Docker):
 routing for all three `local_mode`s, diff validation and forbidden paths, every FSM router, the real
 LangGraph wiring with stubbed nodes (repair loop, 3-repair cap, human gate, tamper halt), the breaker
@@ -340,6 +418,16 @@ sign-in and expiry reporting. A real `claude setup-token` sign-in has not been r
 against seeded Postgres through its read-only role and checked in Chromium at desktop and phone widths,
 light and dark: no script errors, no sideways scrolling, and a hostile issue title rendered as text.
 
+Projects were tested against Postgres 16: the registry and its refusals, moving `github.yaml` repos
+over, fair turns (a busy project cannot starve a quiet one), per-project caps, the checks at the start
+of a run (unregistered, paused, no runner, project settings override the ticket, dependency drift
+caught after a real clone), and unregistered inbox tickets rejected before a run. `scripts/project.sh`
+was run end to end with the real factory code, Postgres and a real git clone, with `docker` replaced by
+a recorder: it fetched only the dependency files, built from the right context and registered the image.
+The database's first-start script was run against Postgres 16: the board role reads tables created by
+later migrations and cannot write. The board was checked in Chromium with three projects, at desktop and
+phone widths, light and dark: no script errors, no sideways scrolling, and the project filter works.
+
 The sealed runner was run against a real Docker Engine 29 daemon on Linux: the factory's own sandbox
 step called the live broker, which loaded a test runner through per-run volumes. Inside, the runner had
 no network, no `.git`, no symlink from the repo, and a read-only tests folder. Its symlinked log,
@@ -347,7 +435,8 @@ no network, no `.git`, no symlink from the repo, and a read-only tests folder. I
 `pre-commit` hook and `core.fsmonitor` planted in the factory's clone did not run during the factory's
 git calls. The real runner images, `docker-proxy` and Docker Desktop on macOS were not available there.
 
-Not yet exercised (Phase 0–1 on your Mac): building the runner, broker and proxy images, the sealed
+Not yet exercised (Phase 0–1 on your Mac): building the runner, broker and proxy images and a
+project's runner image, the `postgres` service and `make backup` / `make restore` inside Docker, the sealed
 runner on Docker Desktop through `docker-proxy` (`make test-sandbox` covers the runner, not the proxy),
 the egress proxy, real Claude/omlx calls, Langfuse ingestion, and the real GitHub API (push, PR creation,
 label and permission calls). Check in

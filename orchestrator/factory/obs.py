@@ -19,6 +19,9 @@ def trace_id_for(run_id: str) -> str:
 
 
 def trace_url(run_id: str) -> str:
+    """Link to the run's Langfuse trace, or "" when Langfuse is off (the default)."""
+    if os.environ.get("LANGFUSE_DISABLED") == "1":
+        return ""
     base = os.environ.get("LANGFUSE_PUBLIC_URL", "http://localhost:3000").rstrip("/")
     return f"{base}/trace/{trace_id_for(run_id)}"
 

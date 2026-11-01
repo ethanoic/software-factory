@@ -5,9 +5,10 @@ issue to a merged pull request written by the factory. You will put the app in i
 factory at it, approve a Claude model, and file three issues: two the factory should complete and one it
 should refuse.
 
-**Before you start:** finish [README → Setup (Phase 0)](../README.md#setup-phase-0) steps 1–9: Docker
-limits, your Claude token (`make claude-token`), Langfuse keys, the factory database and the lockfiles. Commands
-below run from the factory folder unless they say otherwise.
+**Before you start:** finish [README → Setup (Phase 0)](../README.md#setup-phase-0) steps 1–8: Docker
+limits, your Claude token (`make claude-token`), the GitHub token, the lockfiles, `make test-sandbox`, and
+`make up` (which also creates the factory's database). Commands below run from the factory folder unless they
+say otherwise.
 
 ## 1. Put the example in its own repository
 
@@ -40,30 +41,27 @@ tokens) so its repository access includes `factory-hello-node`, with these permi
 | Issues | Read and write | reading issues, setting labels, posting status comments |
 | Metadata | Read | checking who applied a label |
 
-## 3. Build the Node runner image
+## 3. Add the repository as a project
 
-Tests run in a container with no network, so the app's dependencies (Jest, ESLint) are installed into the
-image ahead of time from its lockfile:
-
-```bash
-make runner-ts DEPS=examples/hello-node
-```
-
-There is one Node runner image at a time. Rebuild it whenever the app's `package.json` changes, or when you
-point the factory at a different Node repository.
-
-Then prove the sandbox is sealed on your Docker before any code runs in it:
+The factory works only on repos registered as projects. One command registers it and builds its test runner:
 
 ```bash
-make test-sandbox
+make project-add REPO=ethanoic/factory-hello-node LANGUAGE=javascript
+make project-list                 # should show it active, with a factory-runner-ethanoic-factory-hello-node image
 ```
 
-Every test must pass with none skipped. The factory never shares a folder with the runner: it sends the
-source in as an archive with no `.git` and gets only result files back (README, "Isolation").
+Tests run in a container with no network, so the factory clones the repo, takes its `package.json` and
+`package-lock.json`, and installs Jest and ESLint into an image for this project only. Other projects get
+their own images. When the app's dependencies change later, the next run stops and tells you to run
+`make project-rebuild REPO=ethanoic/factory-hello-node`.
 
-## 4. Point the factory at the repository
+The sandbox itself was checked by `make test-sandbox` during setup. Every test must pass with none skipped:
+the factory never shares a folder with the runner, sends the source in as an archive with no `.git`, and gets
+only result files back (README, "Isolation").
 
-Replace the `repos` list in `github.yaml`:
+## 4. Check the GitHub settings
+
+`github.yaml` holds the settings shared by every project. The defaults work:
 
 ```yaml
 enabled: true
@@ -73,16 +71,15 @@ approve_label: "factory:approve"
 labelers: []
 allowlist_only: false
 comment_on_status: true
-repos:
-  - repo: ethanoic/factory-hello-node
-    base_branch: main
-    language: javascript
 ```
+
+There is no repo list here any more: the factory polls every active project with a runner.
 
 ## 5. Start the factory and approve a model
 
+The factory is already running from setup (`make up`). Ask it which models it can use:
+
 ```bash
-make up
 make pool ARGS="refresh"          # discover models; prints the catalog
 ```
 
@@ -188,8 +185,8 @@ The board shows each of these steps as it happens; the issue labels show the sam
 | When | On the issue | What it means |
 | --- | --- | --- |
 | Within 2 minutes | `factory:ready` → `factory:queued` | The factory took the issue |
-| Shortly after | `factory:running`, comment with the run id | Triage, planning, tests, code, sandbox. Follow it live in Langfuse at http://localhost:3000 |
-| A few minutes later | `factory:awaiting-approval`, comment | The new tests pass and the security scan is clean |
+| Shortly after | `factory:running`, comment with the run id | Triage, planning, tests, code, sandbox. Follow it on the board (and in Langfuse, if you turned it on) |
+| A few minutes later | `factory:awaiting-approval`, comment | The new tests pass and the security scan is clean. Read the change: `make diff RUN=<run id from the comment>` |
 | You add `factory:approve` | `factory:pr-open`, comment with the PR link | A draft PR from branch `factory/ethanoic-factory-hello-node-1` that says `Closes #1` |
 | You merge the PR | Issue closes | Done |
 
@@ -209,7 +206,8 @@ To try a task without filing an issue, save it as a JSON file in `workspace/inbo
  "repo": "ethanoic/factory-hello-node", "base_branch": "main", "language": "javascript"}
 ```
 
-Inbox tickets report through alerts and `make logs` instead of issue labels. Approve one with
+The repo must be a project (step 3). Inbox tickets report through the board, alerts and `make logs`
+instead of issue labels. Read the change with `make diff RUN=<run_id>`, then approve with
 `make approve RUN=<run_id>`.
 
 ## Writing tickets the factory can finish

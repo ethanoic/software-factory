@@ -35,6 +35,9 @@ IMAGES = {"python": os.environ.get("RUNNER_IMAGE_PY", "factory-runner-py:locked"
           "javascript": os.environ.get("RUNNER_IMAGE_TS", "factory-runner-ts:locked"),   # same Node runner
           "typescript": os.environ.get("RUNNER_IMAGE_TS", "factory-runner-ts:locked")}
 RUN_ID = re.compile(r"^[a-z0-9-]{8,64}$")
+# Per-project runner images built by `make project-rebuild`. Only this shape is accepted, so the factory
+# cannot ask for any other image on the machine.
+PROJECT_IMAGE = re.compile(r"^factory-runner-[a-z0-9][a-z0-9-]{0,62}:[a-f0-9]{12}$")
 WALL_S = int(os.environ.get("RUNNER_WALL_S", "300"))
 
 app = FastAPI()
@@ -54,6 +57,7 @@ class RunReq(BaseModel):
     source_tar_b64: str = Field(max_length=MAX_ARCHIVE * 4 // 3 + 8)
     tests_tar_b64: str = Field(max_length=MAX_ARCHIVE * 4 // 3 + 8)
     changed_files: list[str] = Field(default_factory=list, max_length=2000)
+    image: str | None = None          # a project's runner image; None = the language's default image
 
 
 # ------------------------------------------------------------------ Docker
@@ -86,6 +90,8 @@ def healthz():
 def run(req: RunReq):
     if not RUN_ID.fullmatch(req.run_id) or req.language not in IMAGES:
         raise HTTPException(400, "rejected")
+    if req.image is not None and not PROJECT_IMAGE.fullmatch(req.image):
+        raise HTTPException(400, "rejected: not a factory runner image")
     try:
         source = rebuild_archive(base64.b64decode(req.source_tar_b64, validate=True),
                                  skip_prefixes=("tests/", ".factory/"))   # those are their own volumes
@@ -94,7 +100,7 @@ def run(req: RunReq):
     except (Rejected, binascii.Error) as e:
         raise HTTPException(400, f"rejected: {e}")
 
-    c, image = client(), IMAGES[req.language]
+    c, image = client(), req.image or IMAGES[req.language]
     runner_name, loader_name, vols = _names(req.run_id)
     _cleanup(req.run_id)                                     # leftovers from a crashed attempt
     labels = {"factory.run_id": req.run_id}

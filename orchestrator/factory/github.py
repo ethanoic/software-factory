@@ -75,9 +75,9 @@ def validate(cfg: dict) -> dict:
     cfg.setdefault("comment_on_status", True)
     if int(cfg["poll_interval_s"]) < 60:
         raise SystemExit("github.yaml: poll_interval_s must be >= 60")
+    # Projects live in the factory's database now (make project-add). A `repos` list here is only read
+    # once, to move older setups over.
     repos = cfg.get("repos") or []
-    if not repos:
-        raise SystemExit("github.yaml: list at least one repo under `repos`")
     for r in repos:
         if not REPO_RE.fullmatch(r.get("repo", "")):
             raise SystemExit(f"github.yaml: invalid repo {r.get('repo')!r} (expected owner/name)")
@@ -163,16 +163,26 @@ class GitHub:
 class Intake:
     """Polls issues into the inbox and mirrors run status back onto them."""
 
-    def __init__(self, gh: GitHub, cfg: dict, dsn: str, inbox: pathlib.Path):
+    def __init__(self, gh: GitHub, cfg: dict, dsn: str, inbox: pathlib.Path, projects=None):
+        """projects: callable returning the repos to poll, as dicts with repo, base_branch, language and
+        labelers. Default: the ready projects in the factory's database."""
         self.gh, self.cfg, self.dsn, self.inbox = gh, cfg, dsn, inbox
+        self._projects = projects
         self._last_poll = 0.0
         self._labels_ready: set[str] = set()
+
+    def projects(self) -> list[dict]:
+        if self._projects is not None:
+            return list(self._projects())
+        from factory import projects
+        return [p.as_intake() for p in projects.ready(self.dsn)]
 
     # ---------------------------------------------------------- authorization
     def authorized(self, repo: str, login: str | None) -> bool:
         if not login:
             return False
-        if login in self.cfg["labelers"]:
+        extra = next((p.get("labelers") or [] for p in self.projects() if p["repo"].lower() == repo.lower()), [])
+        if login in self.cfg["labelers"] or login in extra:
             return True
         if self.cfg.get("allowlist_only"):
             return False
@@ -200,7 +210,7 @@ class Intake:
         self._last_poll = time.time()
         trigger = self.cfg["trigger_label"]
         queued = []
-        for r in self.cfg["repos"]:
+        for r in self.projects():
             repo = r["repo"]
             try:
                 if repo not in self._labels_ready:
@@ -295,7 +305,9 @@ class Intake:
             if self.cfg["comment_on_status"]:
                 msg = {
                     "running": f"Factory run `{run_id}` started.",
-                    "awaiting_approval": f"Tests and QA passed. Add `{self.cfg['approve_label']}` to open the draft PR.",
+                    "awaiting_approval": f"Tests and QA passed. Read the change first: on the factory computer, run "
+                                         f"`make diff RUN={run_id}`. Then add `{self.cfg['approve_label']}` to open "
+                                         "the draft PR.",
                     "pr_open": f"Draft PR opened: {detail}",
                     "halted": f"Factory run `{run_id}` halted: {detail}",
                     "rejected": f"Not taken by the factory: {detail}. Edit the issue and re-add "

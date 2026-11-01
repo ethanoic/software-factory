@@ -32,9 +32,11 @@ def card(**kw):
     ("breaker: no qualified model for role 'plan'", "trust"),
     ("breaker: run cap $2.00 or wall clock exceeded at repair#2", "RUN_CAP_USD"),
     ("repair limit reached (3 cycles)", "acceptance criteria"),
-    ("sandbox environment: needs a human", "make runner-ts"),
+    ("sandbox environment: needs a human", "make project-rebuild REPO=ethanoic/factory-hello-node"),
     ("sandbox tamper: needs a human", "trace"),
-    ("clone failed: fatal: repository not found", "github.yaml"),
+    ("clone failed: fatal: repository not found", "make project-list"),
+    ("sandbox environment: o/r dependencies changed since its runner image was built", "make project-rebuild"),
+    ("refused: x/y is not a registered project", "make project-add"),
     ("PR creation failed: HTTP 403", "Pull requests"),
     ("something new", "Read the reason"),
 ])
@@ -88,7 +90,9 @@ def db(tmp_path):
     from factory.runner import migrate
     migrate(DSN)
     with psycopg.connect(DSN, autocommit=True) as c:
-        c.execute("TRUNCATE runs, factory_health")
+        c.execute("TRUNCATE runs, factory_health, projects")
+        c.execute("""INSERT INTO projects (repo, language, runner_image, deps_hash)
+                     VALUES (%s, 'javascript', 'factory-runner-x:0123456789ab', repeat('0', 64))""", (R,))
         c.execute("DELETE FROM github_issues")
     inbox = tmp_path / "inbox"
     (inbox / "parked").mkdir(parents=True)
@@ -162,7 +166,8 @@ def test_merged_pr_closes_the_card(db):
     with psycopg.connect(DSN, autocommit=True) as c:
         c.execute("INSERT INTO github_issues (repo, number, status, run_id) VALUES (%s, 6, 'pr_open', 'run-m')", (R,))
     gh = GitHub("t", transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"state": "closed"})))
-    intake = Intake(gh, validate({"repos": [{"repo": R}]}), DSN, db)
+    cfg = validate({"repos": [{"repo": R}]})
+    intake = Intake(gh, cfg, DSN, db, projects=lambda: cfg["repos"])
     assert intake.sync_closed() == 1
     assert board.build_board(DSN, db)["finished"][0]["status"] == "done"
 
@@ -231,3 +236,22 @@ def test_server_refuses_writes_rebinding_and_traversal(server):
     assert get(f"{server}/api/board", host="evil.example:8090")[0] == 421       # DNS rebinding
     assert get(f"{server}/../board.py")[0] == 404
     assert get(f"{server}/%2e%2e/board.py")[0] == 404
+
+
+@needs_db
+def test_projects_on_the_board(db):
+    with psycopg.connect(DSN, autocommit=True) as c:
+        c.execute("INSERT INTO projects (repo, language) VALUES ('o/new', 'python')")
+        c.execute("INSERT INTO projects (repo, language, status) VALUES ('o/quiet', 'python', 'paused')")
+    heartbeat(DSN, {"runs_today": 1, "daily_limit": 4, "missing_roles": []})
+    record_run(DSN, "run-p1", **ticket_fields(ticket(3)), status="halted", detail="sandbox environment: x")
+    b = board.build_board(DSN, db)
+    by = {p["repo"]: p for p in b["projects"]}
+    assert by[R]["ready"] and by[R]["runs_today"] == 1 and by[R]["stopped"] == 1
+    assert not by["o/new"]["ready"] and by["o/quiet"]["status"] == "paused"
+    titles = [a["title"] for a in b["actions"]]
+    assert "Build the runner for o/new" in titles and not any("o/quiet" in t for t in titles)
+    assert b["cards"][0]["ref"] == f"{R}#3"                       # several projects: full names
+    with psycopg.connect(DSN, autocommit=True) as c:
+        c.execute("TRUNCATE projects")
+    assert [a["title"] for a in board.build_board(DSN, db)["actions"]][0] == "Add your first project"

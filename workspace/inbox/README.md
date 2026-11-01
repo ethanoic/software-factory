@@ -1,7 +1,9 @@
 # Ticket inbox
 
-Drop one JSON file per ticket here. The orchestrator picks up the oldest file every 30 seconds,
-up to `subscription.max_factory_runs_per_day` runs per 24 hours while on Claude Pro.
+Drop one JSON file per ticket here. `repo` must be a registered project (`make project-list`); the
+project's language and branch are used whatever the file says. Every 30 seconds the factory takes the
+next ticket: projects take turns (fewest runs in the last 24 hours first), each within its own daily
+cap, and all within `subscription.max_factory_runs_per_day` while on Claude Pro.
 
 ```json
 {"ticket_id": "APP-142", "title": "Cart rejects negative quantities",
@@ -10,4 +12,5 @@ up to `subscription.max_factory_runs_per_day` runs per 24 hours while on Claude 
 ```
 
 Subfolders: `processing/` (in flight), `done/`, `parked/` (waiting for Claude plan limits to reset),
-`rejected/` (invalid JSON).
+`rejected/` (invalid JSON, or a repo that is not a project). Tickets for a paused project, or one
+whose runner is not built yet, stay here until it is ready.
