@@ -253,7 +253,9 @@ Langfuse keeps the full prompts, including issue text and source files. Keep it 
 `make board` opens **http://localhost:8090**: where every ticket is, and what you need to do next.
 
 - **Projects** lists each project: ready, stopped tickets, no runner yet, or paused, with its runs today.
-  Click a project, or use *Show*, to see only its tickets; system items stay visible either way.
+  Click a project, or use *Show*, to see only its tickets and the items waiting on you for it; items
+  about the factory itself (start it, approve a model, renew the token) stay visible either way. The
+  address becomes `http://localhost:8090/?project=owner/name`, so you can bookmark one project's view.
 
 - **Your move** lists everything waiting on you, most urgent first: start the factory, approve a model,
   fix and retry a stopped ticket, approve a passed ticket, review and merge a PR, renew the Claude token.

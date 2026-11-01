@@ -251,6 +251,7 @@ def test_projects_on_the_board(db):
     assert not by["o/new"]["ready"] and by["o/quiet"]["status"] == "paused"
     titles = [a["title"] for a in b["actions"]]
     assert "Build the runner for o/new" in titles and not any("o/quiet" in t for t in titles)
+    assert next(a for a in b["actions"] if a["title"] == "Build the runner for o/new")["project"] == "o/new"
     assert b["cards"][0]["ref"] == f"{R}#3"                       # several projects: full names
     with psycopg.connect(DSN, autocommit=True) as c:
         c.execute("TRUNCATE projects")

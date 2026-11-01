@@ -13,8 +13,13 @@ const DOING = {
 let lastBody = "";
 let lastOk = 0;
 let lastData = null;
-let filter = "";
-try { filter = localStorage.getItem("factory-board-project") || ""; } catch { /* storage blocked: no memory */ }
+// The selected project lives in the address (?project=owner/name), so a filtered view can be bookmarked;
+// the last choice is also remembered in this browser for when the page opens without one.
+let filter = new URLSearchParams(location.search).get("project") || "";
+if (!filter) {
+  try { filter = localStorage.getItem("factory-board-project") || ""; } catch { /* storage blocked: no memory */ }
+}
+filter = filter.toLowerCase();
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -88,6 +93,7 @@ function renderProjects(projects) {
   const list = document.getElementById("projects");
   const select = document.getElementById("project-filter");
   document.getElementById("projects-count").textContent = projects.length ? `(${projects.length})` : "";
+  document.title = filter ? `${filter} · Factory board` : "Factory board";
   const names = projects.map((p) => p.repo);
   if (filter && !names.includes(filter)) filter = "";
   select.replaceChildren(el("option", { value: "", text: "All projects" }),
@@ -112,6 +118,9 @@ function renderProjects(projects) {
 function setFilter(value) {
   filter = value;
   try { localStorage.setItem("factory-board-project", value); } catch { /* not remembered */ }
+  const url = new URL(location.href);
+  if (value) url.searchParams.set("project", value); else url.searchParams.delete("project");
+  history.replaceState(null, "", url);
   if (lastData) renderAll(lastData);
 }
 
@@ -125,7 +134,8 @@ function renderAll(data) {
   const finished = data.finished.filter(mine);
   const all = [...data.cards, ...data.finished];
   const byId = new Map(all.map((c) => [c.id, c]));
-  const actions = data.actions.filter((a) => !a.card || mine(byId.get(a.card) || {}));
+  // System items (start the factory, renew the token) always show; project items only for that project.
+  const actions = data.actions.filter((a) => a.card ? mine(byId.get(a.card) || {}) : !a.project || mine({ repo: a.project }));
   renderMoves(actions, all);
   renderLine(data.stations, cards);
   renderFinished(finished);

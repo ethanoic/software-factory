@@ -196,7 +196,7 @@ def project_actions(projects: list[dict], online: bool) -> list[dict]:
                  "why": "The factory works only on repos you add as projects, and none are added yet.",
                  "steps": [step("Add the repo; this also builds its test runner:",
                                 command="make project-add REPO=<owner/name> LANGUAGE=<python|javascript|typescript>")]}]
-    return [{"tone": "stopped", "rank": 1, "title": f"Build the runner for {p['repo']}",
+    return [{"tone": "stopped", "rank": 1, "title": f"Build the runner for {p['repo']}", "project": p["repo"],
              "why": "This project has no test runner yet, so its tickets wait in the queue.",
              "steps": [step("Build it:", command=f"make project-rebuild REPO={p['repo']}")]}
             for p in projects if not p["ready"] and p["status"] == "active"]
