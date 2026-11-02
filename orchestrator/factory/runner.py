@@ -50,7 +50,7 @@ def missing_roles() -> list[str]:
     """Roles a run needs right now that have no qualified or trusted model."""
     from factory.pool import NoQualifiedModel, get_pool
     mode = policy().get("local_mode", "assist")
-    needed = ["plan", "generate_remote", "repair", "security_fix"]
+    needed = ["plan", "write_tests", "generate_remote", "review_code", "repair", "security_fix"]
     needed += ["spillover"] if mode == "off" else ["classify"]
     needed += ["generate"] if mode == "generate" else []
     out = []
@@ -115,6 +115,15 @@ def outcome(app, cfg) -> tuple[str, str]:
     return "halted", v.get("halt_reason") or "halted"
 
 
+def approval_note(snap: dict) -> str:
+    """What the checks found, for the approval comment, the board and `make diff`."""
+    from factory.review import summary
+    rc = snap.get("red_check")
+    ind = (snap.get("independence") or {}).get("write_tests", "independence unknown")
+    return (f"Tests: {rc.detail if rc else 'not checked'} before the change (written by "
+            f"{(snap.get('model_pins') or {}).get('write_tests', '?')}, {ind}).\n{summary(snap.get('review'))}")
+
+
 def run_or_park(deps: Deps, saver, run_id: str, first_input, intake=None) -> str:
     app = compile_app(deps, saver)
     cfg = config_for(run_id)
@@ -129,6 +138,8 @@ def run_or_park(deps: Deps, saver, run_id: str, first_input, intake=None) -> str
         return "parked"
     st, detail = outcome(app, cfg)
     snap = app.get_state(cfg).values
+    if st == "awaiting_approval":
+        detail = approval_note(snap)
     record_run(deps.dsn, run_id, status=st, detail=detail,
                pr_url=detail if st == "pr_open" else None,
                stage="compile_pr" if st in ("awaiting_approval", "pr_open") else None,
@@ -325,7 +336,8 @@ def main(argv: list[str] | None = None) -> None:
             t = snap["ticket"]
             print(f"# {a.run_id} · {t.repo} · {t.ticket_id}: {t.title}\n"
                   f"# repairs: {snap.get('repair_attempts', 0)} · tests passed: "
-                  f"{getattr(snap.get('sandbox'), 'passed', '?')}\n")
+                  f"{getattr(snap.get('sandbox'), 'passed', '?')}")
+            print("\n".join("# " + line for line in approval_note(snap).splitlines()) + "\n")
             print(snap["patch"].unified_diff, end="")
             return
         if a.cmd == "run":

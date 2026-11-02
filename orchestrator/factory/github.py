@@ -305,9 +305,9 @@ class Intake:
             if self.cfg["comment_on_status"]:
                 msg = {
                     "running": f"Factory run `{run_id}` started.",
-                    "awaiting_approval": f"Tests and QA passed. Read the change first: on the factory computer, run "
-                                         f"`make diff RUN={run_id}`. Then add `{self.cfg['approve_label']}` to open "
-                                         "the draft PR.",
+                    "awaiting_approval": f"Tests and QA passed.\n\n{detail}\n\nRead the change first: on the factory "
+                                         f"computer, run `make diff RUN={run_id}`. Then add "
+                                         f"`{self.cfg['approve_label']}` to open the draft PR.",
                     "pr_open": f"Draft PR opened: {detail}",
                     "halted": f"Factory run `{run_id}` halted: {detail}",
                     "rejected": f"Not taken by the factory: {detail}. Edit the issue and re-add "
@@ -315,7 +315,7 @@ class Intake:
                     "parked": "Paused: the Claude plan limit was reached. The run resumes automatically.",
                 }.get(status)
                 if msg:
-                    self.gh.comment(repo, n, msg[:2000])
+                    self.gh.comment(repo, n, msg[:6000])
         except (httpx.HTTPError, psycopg.Error) as e:
             print(f"[github] report {repo}#{n} {status} failed: {e}", flush=True)
 

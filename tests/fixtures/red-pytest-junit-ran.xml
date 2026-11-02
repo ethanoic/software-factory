@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="3" time="0.032" timestamp="2026-11-02T21:47:55.889789+08:00" hostname="vm"><testcase classname="tests.test_new" name="test_trims" time="0.001"><failure message="AssertionError: assert 'Hello,   Ada !' == 'Hello, Ada!'&#10;  &#10;  - Hello, Ada!&#10;  + Hello,   Ada !&#10;  ?        ++   +">&gt;   def test_trims(): assert greet("  Ada ") == "Hello, Ada!"
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: assert 'Hello,   Ada !' == 'Hello, Ada!'
+E     
+E     - Hello, Ada!
+E     + Hello,   Ada !
+E     ?        ++   +
+
+tests/test_new.py:2: AssertionError</failure></testcase><testcase classname="tests.test_new.TestMore" name="test_already_ok" time="0.000" /><testcase classname="tests.test_old" name="test_default" time="0.000" /></testsuite></testsuites>

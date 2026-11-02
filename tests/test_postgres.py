@@ -150,7 +150,7 @@ def test_quota_exhausted_parks_and_resumes_from_checkpoint(db, monkeypatch):
 
     from factory import graph, nodes
     from factory.pool import QuotaExhausted
-    from factory.state import FailureClass, Patch, Plan, QAResult, SandboxResult, Tier, TicketSpec
+    from factory.state import FailureClass, Patch, Plan, QAResult, RedCheck, SandboxResult, Tier, TicketSpec
 
     class StubDeps:
         def breaker_for(self, run_id):
@@ -173,7 +173,10 @@ def test_quota_exhausted_parks_and_resumes_from_checkpoint(db, monkeypatch):
     monkeypatch.setattr(nodes, "ingest", lambda s, d: {"base_sha": "abc"})
     monkeypatch.setattr(nodes, "triage", lambda s, d: {"accepted": True})
     monkeypatch.setattr(nodes, "plan", plan_node)
+    monkeypatch.setattr(nodes, "write_tests", lambda s, d: {"plan": plan, "tests_feedback": None})
     monkeypatch.setattr(nodes, "freeze_tests", lambda s, d: {"tests_sha256": "h"})
+    monkeypatch.setattr(nodes, "red_check", lambda s, d: {"red_check": RedCheck(new_tests=1, new_failed=1)})
+    monkeypatch.setattr(nodes, "review_code", lambda s, d: {"review": None})
     monkeypatch.setattr(nodes, "generate", generate)
     monkeypatch.setattr(nodes, "sandbox", lambda s, d: {"sandbox": SandboxResult(
         exit_code=0, passed=1, failed=0, lint_errors=0, failure_class=FailureClass.NONE)})
@@ -204,7 +207,7 @@ def test_trust_lets_runs_start_without_a_suite_and_is_marked_manual(db):
     with pytest.raises(NoQualifiedModel):
         pool.select("plan")
     roles = pool.trust("anthropic/a-x")
-    assert set(roles) == {"plan", "generate_remote", "repair", "security_fix", "spillover"}
+    assert set(roles) == {"plan", "write_tests", "generate_remote", "review_code", "repair", "security_fix", "spillover"}
     assert pool.select("plan").model_id == "anthropic/a-x"
     assert pool.trust("local/small") == ["generate", "classify"]
     with pytest.raises(ValueError, match="cannot fill"):

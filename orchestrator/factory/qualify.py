@@ -1,9 +1,13 @@
 """Model qualification (spec §5.2). Runs as part of the pool worker, never inside a ticket run.
 
 Suites live in qualification/:
-  code/*.json    {"ticket": {...TicketSpec...}}                    -> plan, generate_remote, repair, security_fix, generate
+  code/*.json    {"ticket": {...TicketSpec...}}                    -> plan, write_tests, generate_remote, repair,
+                                                                       security_fix, generate
+  review/*.json  {"ticket": {...}, "criteria": [...], "diff": "...", "expect": "block"|"pass",
+                  "category": ["<blocking categories, one of which it must name>"]}  -> review_code
   triage/*.json  {"ticket": {...}, "expected_accept": true|false}  -> classify, spillover
-A code task passes when the run reaches compile_pr (dry run) with zero repair cycles.
+A code task passes when the run reaches compile_pr (dry run) with zero repair cycles. A review task passes
+when the reviewer blocks a bad diff for the right reason, or lets a clean one through.
 """
 from __future__ import annotations
 
@@ -19,7 +23,7 @@ from factory.config import policy
 from factory.pool import SUITE_FOR, ModelPool, NoQualifiedModel, QuotaExhausted, suite_dir
 from factory.state import TicketSpec, Tier
 
-CODE_ROLES = ("plan", "generate_remote", "repair", "security_fix")
+CODE_ROLES = ("plan", "write_tests", "generate_remote", "repair", "security_fix")
 
 
 def month_eval_spend(dsn: str) -> float:
@@ -71,6 +75,36 @@ def qualify_triage(pool: ModelPool, deps, model_id: str, role: str) -> tuple[flo
     return ok / max(len(tasks), 1), spent / max(len(tasks), 1), statistics.median(lat or [0])
 
 
+def qualify_review(pool: ModelPool, deps, model_id: str, role: str) -> tuple[float, float, float]:
+    """Known-bad and known-clean diffs. Passing = blocks the bad ones, naming the expected category, and
+    raises nothing blocking on the clean ones. The blocking decision uses the same rules as real runs."""
+    from factory import prompts, review
+    from factory.gateway import Decision, Task, TaskKind, TriageGateway
+    from factory.state import Plan
+    run_id = f"qual-{uuid.uuid4().hex[:12]}"
+    gw = TriageGateway(Breaker(deps.dsn, run_id), {role: model_id}, pool)
+    spec = pool.spec(model_id)
+    ok, lat = 0, []
+    tasks = _tasks(role)
+    for task in tasks:
+        t = TicketSpec(**task["ticket"])
+        plan = Plan(summary=t.title, target_files=[], acceptance_criteria=task.get("criteria", []), complexity="routine")
+        started = time.time()
+        raw = gw._call(Task(TaskKind.REVIEW_CODE, prompts.review_code(t, plan, task["diff"], 1, []),
+                            max_output_tokens=4_096, node="qual"),
+                       Decision(Tier.T3_REMOTE, role, "qualification", spec), run_id, tried=())
+        lat.append(time.time() - started)
+        rv = review.parse(raw, model=model_id, independent=True)
+        if task["expect"] == "block":
+            want = task.get("category") or []
+            want = [want] if isinstance(want, str) else want
+            ok += rv.blocked and (not want or any(f.blocking and f.category in want for f in rv.findings))
+        else:
+            ok += rv.completed and not rv.blocked
+    spent = gw.breaker.spent()
+    return ok / max(len(tasks), 1), spent / max(len(tasks), 1), statistics.median(lat or [0])
+
+
 def qualify_code(pool: ModelPool, deps, model_id: str, role: str, budget: float) -> tuple[float, float, float]:
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -114,6 +148,8 @@ def qualify_candidates(pool: ModelPool, deps) -> None:
                 continue
             if SUITE_FOR.get(role) == "triage":
                 score, usd, latency = qualify_triage(pool, deps, model_id, role)
+            elif SUITE_FOR.get(role) == "review":
+                score, usd, latency = qualify_review(pool, deps, model_id, role)
             elif role in CODE_ROLES and model_id in done_code:     # one code run scores all code roles
                 score, usd, latency = done_code[model_id]
             else:

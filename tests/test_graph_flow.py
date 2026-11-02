@@ -4,7 +4,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from factory import graph, nodes
 from factory.breaker import BreakerTripped
-from factory.state import FailureClass, Patch, Plan, QAResult, SandboxResult, Tier, TicketSpec
+from factory.state import Finding, RedCheck, Review, FailureClass, Patch, Plan, QAResult, SandboxResult, Tier, TicketSpec
 
 
 class StubBreaker:
@@ -24,6 +24,7 @@ class StubDeps:
 
 TICKET = TicketSpec(ticket_id="T-1", title="t", body="b", repo="o/r", language="python")
 PLAN = Plan(summary="s", target_files=["app.py"], acceptance_criteria=["c"], test_files=[], complexity="routine")
+REVIEWS: list = []          # reviews the stubbed reviewer returns, in order (then: no findings)
 
 
 def sandbox_result(fc):
@@ -35,11 +36,16 @@ def sandbox_result(fc):
 def stub_nodes(monkeypatch):
     calls = {"sandbox": 0, "repair": 0}
     outcomes = []
+    reviews = REVIEWS
+    reviews.clear()
 
     monkeypatch.setattr(nodes, "ingest", lambda s, d: {"base_sha": "abc"})
     monkeypatch.setattr(nodes, "triage", lambda s, d: {"accepted": True})
     monkeypatch.setattr(nodes, "plan", lambda s, d: {"plan": PLAN})
+    monkeypatch.setattr(nodes, "write_tests", lambda s, d: {"plan": PLAN, "tests_feedback": None})
     monkeypatch.setattr(nodes, "freeze_tests", lambda s, d: {"tests_sha256": "h"})
+    monkeypatch.setattr(nodes, "red_check", lambda s, d: {"red_check": RedCheck(new_tests=2, new_failed=2)})
+    monkeypatch.setattr(nodes, "review_code", lambda s, d: {"review": reviews.pop(0) if reviews else None})
     monkeypatch.setattr(nodes, "generate", lambda s, d: {
         "patch": Patch(unified_diff="d", produced_by=Tier.T3_REMOTE, model="m"), "qa": None})
 
@@ -114,3 +120,53 @@ def test_runner_outcome_maps_every_end_state(stub_nodes, monkeypatch):
     app, cfg, _ = start(graph.compile_app(StubDeps(), MemorySaver()), "run-out-0003")
     st, detail = outcome(app, cfg)
     assert st == "halted" and "repair limit" in detail
+
+
+# ------------------------------------------------------------------ the independent checks
+def blocking(cat="network"):
+    return Review(model="m2", independent=True, findings=[Finding(category=cat, detail="x", blocking=True)])
+
+
+def test_review_block_goes_back_to_repair_then_passes(stub_nodes):
+    calls, outcomes = stub_nodes
+    outcomes += [FailureClass.NONE, FailureClass.NONE]
+    REVIEWS.append(blocking())                              # first review blocks, second is clean
+    app, cfg, _ = start(graph.compile_app(StubDeps(), MemorySaver()))
+    assert app.get_state(cfg).next == ("compile_pr",)
+    assert calls == {"sandbox": 2, "repair": 1}
+
+
+def test_review_that_never_clears_halts_at_the_repair_limit(stub_nodes):
+    calls, outcomes = stub_nodes
+    outcomes += [FailureClass.NONE] * 4
+    REVIEWS.extend([blocking("secrets")] * 4)
+    _, _, final = start(graph.compile_app(StubDeps(), MemorySaver()))
+    assert calls["repair"] == 3 and "independent review still blocks (secrets)" in final["halt_reason"]
+
+
+def test_advisory_findings_do_not_block(stub_nodes):
+    calls, outcomes = stub_nodes
+    outcomes.append(FailureClass.NONE)
+    REVIEWS.append(Review(model="m2", independent=True, findings=[Finding(category="quality", detail="naming")]))
+    app, cfg, _ = start(graph.compile_app(StubDeps(), MemorySaver()))
+    assert app.get_state(cfg).next == ("compile_pr",) and calls["repair"] == 0
+
+
+def test_tests_that_already_pass_go_back_to_the_test_writer_once(stub_nodes, monkeypatch):
+    calls, outcomes = stub_nodes
+    outcomes.append(FailureClass.NONE)
+    seen = {"write_tests": 0}
+
+    def write_tests(s, d):
+        seen["write_tests"] += 1
+        return {"plan": PLAN, "tests_feedback": None}
+
+    def red_check(s, d):                                     # green first time, red after the rewrite
+        if s.get("test_revisions", 0) == 0:
+            return {"red_check": RedCheck(new_tests=2, new_failed=0), "tests_feedback": "already pass",
+                    "test_revisions": 1}
+        return {"red_check": RedCheck(new_tests=2, new_failed=1)}
+    monkeypatch.setattr(nodes, "write_tests", write_tests)
+    monkeypatch.setattr(nodes, "red_check", red_check)
+    app, cfg, _ = start(graph.compile_app(StubDeps(), MemorySaver()))
+    assert seen["write_tests"] == 2 and app.get_state(cfg).next == ("compile_pr",)

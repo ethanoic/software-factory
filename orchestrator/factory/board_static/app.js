@@ -5,8 +5,10 @@
 
 const POLL_MS = 5000;
 const DOING = {
-  ingest: "Cloning the repo", triage: "Triaging", plan: "Planning", freeze_tests: "Freezing the tests",
-  generate: "Writing code", sandbox: "Running the tests", qa: "Security scan", repair: "Repairing",
+  ingest: "Cloning the repo", triage: "Triaging", plan: "Planning", write_tests: "Writing the tests",
+  freeze_tests: "Freezing the tests", red_check: "Checking the tests fail first",
+  generate: "Writing code", sandbox: "Running the tests", qa: "Security scan",
+  review_code: "Independent review", repair: "Repairing",
   compile_pr: "Opening the PR",
 };
 

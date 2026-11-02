@@ -94,6 +94,10 @@ make pool ARGS="list"                                          # every role shou
 
 - **Which Claude model:** for the hello world, pick a mid-tier (Sonnet-class) model. Every run uses your Pro
   usage limits.
+- **A second Claude model for the checks:** the tests and the review should come from a different model than
+  the code. Trust a second one for those two roles only:
+  `make pool ARGS="trust anthropic/<another Claude model id> write_tests review_code"`. With only one, runs
+  still work, and each approval says the same model checked its own work.
 - **No local model yet?** Set `local_mode: off` in `pool.yaml` and run `make up` again. The trusted Claude
   model then triages tickets too.
 - **What trust means:** the model is marked *trusted (not measured)*. The first real qualification result
