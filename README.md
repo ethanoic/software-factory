@@ -64,7 +64,9 @@ The factory is one service on your Mac with its own database. Clone this repo, t
    services read this folder (inbox, config, secrets). If you turn on Enhanced Container Isolation,
    allow the `tecnativa/docker-socket-proxy` image to mount the Docker socket, or `docker-proxy` cannot start.
 2. `make init` — creates `workspace/`, `secrets/`, `backups/` and `.env.factory` (chmod 600) with random
-   passwords for the factory's database.
+   passwords for the factory's database. Docker must be running. `make up` repeats this check, so an
+   older `.env.factory` gets any settings added since, and blank database passwords are generated
+   before the database exists (never after: Postgres keeps its first password).
 3. **Claude Pro token**: `make claude-token` (see "Claude plan token" below). It uses your current
    claude.ai login and stores a one-year token in `secrets/claude_oauth_token`. Keep `ANTHROPIC_API_KEY`
    and `ANTHROPIC_AUTH_TOKEN` unset.

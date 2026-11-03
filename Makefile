@@ -43,9 +43,7 @@ help:
 
 init:
 	mkdir -p workspace/inbox hoststat secrets qualification/code qualification/triage backups
-	@[ -f .env.factory ] || (sed -e "s/^FACTORY_DB_PASSWORD=.*/FACTORY_DB_PASSWORD=$$(openssl rand -hex 24)/" \
-	  -e "s/^FACTORY_BOARD_DB_PASSWORD=.*/FACTORY_BOARD_DB_PASSWORD=$$(openssl rand -hex 24)/" \
-	  .env.factory.example > .env.factory && chmod 600 .env.factory && echo "created .env.factory (database passwords generated)")
+	@scripts/env-check.sh
 	@[ -f secrets/github_token ] || (touch secrets/github_token && chmod 600 secrets/github_token && echo "put a fine-grained GitHub token in secrets/github_token")
 	@[ -f secrets/claude_oauth_token ] || (touch secrets/claude_oauth_token && chmod 600 secrets/claude_oauth_token && echo "run make claude-token to store your Claude plan token")
 
@@ -83,6 +81,7 @@ runner-ts:
 SERVICES = postgres orchestrator pool-worker sandbox-broker docker-proxy egress-proxy board
 
 up:
+	@scripts/env-check.sh
 	$(COMPOSE) up -d --build $(SERVICES)
 
 down:
