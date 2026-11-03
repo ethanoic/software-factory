@@ -30,10 +30,26 @@ def route_after_sandbox(s: FactoryState) -> str:
     return "repair" if s.get("repair_attempts", 0) < MAX_REPAIRS else "halt"
 
 
+def route_after_red_check(s: FactoryState) -> str:
+    if s.get("halt_reason"):
+        return "halt"
+    rc = s.get("red_check")
+    return "generate" if rc is not None and rc.new_failed >= 1 else "write_tests"
+
+
 def route_after_qa(s: FactoryState) -> str:
     if s.get("halt_reason"):
         return "halt"
     if s["qa"].high_findings == 0:
+        return "review_code"
+    return "repair" if s.get("repair_attempts", 0) < MAX_REPAIRS else "halt"
+
+
+def route_after_review(s: FactoryState) -> str:
+    if s.get("halt_reason"):
+        return "halt"
+    rv = s.get("review")
+    if rv is None or not rv.blocked:
         return "compile_pr"
     return "repair" if s.get("repair_attempts", 0) < MAX_REPAIRS else "halt"
 
@@ -62,18 +78,24 @@ def build(deps):
     from factory.breaker import guarded
 
     g = StateGraph(FactoryState)
-    for name in ("ingest", "triage", "plan", "freeze_tests", "generate", "sandbox", "qa", "repair", "compile_pr"):
+    for name in ("ingest", "triage", "plan", "write_tests", "freeze_tests", "red_check", "generate", "sandbox", "qa",
+                 "review_code", "repair", "compile_pr"):
         g.add_node(name, guarded(getattr(nodes, name), deps, node_name=name))
     g.add_node("halt", nodes.halt)                       # never guarded: must always run
 
     g.add_edge(START, "ingest")
-    for src, dst in (("ingest", "triage"), ("plan", "freeze_tests"), ("freeze_tests", "generate")):
+    for src, dst in (("ingest", "triage"), ("plan", "write_tests"), ("write_tests", "freeze_tests"),
+                     ("freeze_tests", "red_check")):
         g.add_conditional_edges(src, next_or_halt(dst), {dst: dst, "halt": "halt"})
+    g.add_conditional_edges("red_check", route_after_red_check,
+                            {"generate": "generate", "write_tests": "write_tests", "halt": "halt"})
     g.add_conditional_edges("triage", route_after_triage, {"plan": "plan", "halt": "halt"})
     g.add_conditional_edges("generate", route_after_generate,
                             {"sandbox": "sandbox", "repair": "repair", "halt": "halt"})
     g.add_conditional_edges("sandbox", route_after_sandbox, {"qa": "qa", "repair": "repair", "halt": "halt"})
-    g.add_conditional_edges("qa", route_after_qa, {"compile_pr": "compile_pr", "repair": "repair", "halt": "halt"})
+    g.add_conditional_edges("qa", route_after_qa, {"review_code": "review_code", "repair": "repair", "halt": "halt"})
+    g.add_conditional_edges("review_code", route_after_review,
+                            {"compile_pr": "compile_pr", "repair": "repair", "halt": "halt"})
     g.add_conditional_edges("repair", route_after_repair, {"sandbox": "sandbox", "repair": "repair", "halt": "halt"})
     g.add_conditional_edges("compile_pr", route_after_pr, {"end": END, "halt": "halt"})
     g.add_edge("halt", END)
@@ -85,4 +107,4 @@ def compile_app(deps, saver, *, human_gate: bool = True):
 
 
 def config_for(run_id: str) -> dict:
-    return {"configurable": {"thread_id": f"run-{run_id}"}, "recursion_limit": 40}
+    return {"configurable": {"thread_id": f"run-{run_id}"}, "recursion_limit": 60}

@@ -1,7 +1,8 @@
 # AI Software Factory (local, M1 Max)
 
-Turns a ticket into a draft pull request: **triage → plan → frozen tests → generate → sandbox → QA →
-repair (≤ 3) → human approval → draft PR**. Claude (on your Pro plan) writes every line of code; a
+Turns a ticket into a draft pull request: **triage → plan → tests (written by a separate model) → check the
+tests fail first → generate → sandbox → QA → independent review → repair (≤ 3) → human approval → draft
+PR**. Claude (on your Pro plan) writes every line of code; a
 small local model only triages tickets. This repo is the reference implementation of the technical
 specification; where a snippet in the spec differs, this code wins.
 
@@ -40,7 +41,7 @@ the sample Node.js app in `examples/hello-node` from a GitHub issue to a merged 
 
 | # | Decision |
 | --- | --- |
-| D1 | LangGraph + Postgres checkpointer; human approval before every PR; PRs open as drafts on `factory/<ticket>` |
+| D1 | LangGraph + Postgres checkpointer; human approval before every PR; PRs open as drafts on `factory/<ticket>`. The pipeline code is the supervisor: no model decides which step runs next |
 | D2 | Coding roles use Anthropic models only; which Claude model is chosen by your qualification suite, never hardcoded |
 | D3 | Claude Pro via the Claude Agent SDK, signed in with a plan token from `make claude-token` (Docker secret), tools disabled |
 | D4 | `local_mode: assist`: a 4–8B MLX model via omlx triages tickets; 10 GB resident cap |
@@ -50,6 +51,7 @@ the sample Node.js app in `examples/hello-node` from a GitHub issue to a merged 
 | D8 | Sealed runner: no network, no shared folders, no `.git`, no tokens; code goes in and results come out as archives through the broker. Only `docker-proxy` holds the Docker socket. The factory never works on its own repo. Egress allowlist; hashed lockfiles |
 | D9 | Many projects, one operator: each project is a row in the factory's database with its own runner image, daily cap and labelers; projects take turns. GitHub Issues polled every 2 min per project; only issues a maintainer labels `factory:ready`; status written back as labels and comments. `workspace/inbox/` stays as a fallback |
 | D10 | The factory has its own Postgres. Langfuse is optional: one trace per run, explicit cost, `savings_usd` at list price |
+| D11 | No model grades its own work: a separate test writer working from signatures, a "tests must fail first" check, and an independent reviewer that can block but never approve |
 
 **Upgrade trigger (D3/D4):** if runs park on Pro limits more than twice a week, or the factory blocks
 your own coding, move to Max 5x, claim its US$100/month API credit into a Console organization, set
@@ -351,12 +353,51 @@ the factory refuses to work on its own repo, so a run can never change the facto
 The sealed runner closes the review's two critical findings (F1 and F2). Three gaps remain:
 
 - **A runner can still forge a pass.** It writes its own test report, so code that exits early or
-  fakes `junit.xml` can look green. Before you approve, read the diff in the trace. Before you merge,
-  read the draft PR's diff.
+  fakes `junit.xml` can look green. The independent reviewer now blocks the usual ways of doing this
+  (`obfuscation`, `disabled_checks`), but it reads code and can miss things. Before you approve, read
+  `make diff`; before you merge, read the draft PR's diff.
 - **The diff filter allows test and tool config files** such as `conftest.py`, `jest.config.js` and
   `.npmrc`. Treat any change to those in a factory PR as a red flag.
 - **Pushes may trigger the target repo's CI.** Approving pushes a `factory/*` branch. If that repo has
   workflows that run on every push with secrets, limit them to protected branches first.
+
+## Independent checks: no model grades its own work
+
+The model that writes the code never decides whether it is done. Three checks sit between it and your
+approval, and the pipeline code (not a model) decides what happens after each.
+
+| Check | Who | Sees | Outcome |
+| --- | --- | --- | --- |
+| **Tests written separately** | The `write_tests` role: a different model from the code writer whenever one is approved | The ticket, the plan's acceptance criteria and the target files' **signatures only** (function and class names, parameters, docstring first lines), never their code | New test files under `tests/`, with every criterion mapped to at least one test, or the run stops |
+| **Tests must fail first** | No model: the sealed runner | The new tests against the **unchanged** code | At least one must fail. If all pass (or none ran), the test writer gets one more try, then the run stops: tests that already pass do not test the change |
+| **Independent review** | The `review_code` role: a different model from the code writer whenever one is approved | The ticket, criteria, the diff and the test count, never the writer's reasoning | Findings by category. The factory, not the model, decides which block (`review` in `pool.yaml`) |
+
+**What the reviewer blocks, by default:** `scope` (changes the ticket did not ask for), `secrets`
+(reading tokens, env vars or files outside the repo), `network` (calls, sockets, downloads, shell
+commands), `disabled_checks` (weakened tests, validation or auth), `test_or_tool_config` (test, lint,
+build, package or CI config), and `obfuscation` (`eval`, encoded code, behaving differently under test).
+A block sends the change back to repair, counting toward the 3-repair limit; security categories go to
+the `security_fix` role. `unmet_criterion`, `correctness` and `quality` findings never block: they appear
+in the approval comment, the board, `make diff` and the PR body. The reviewer **cannot approve**
+anything, and an answer it gives that cannot be read is shown to you as "did not complete", never as a pass.
+
+**Use two Claude models.** Independence needs a second approved model. With one, the factory still runs
+both checks and says on every approval that the same model reviewed its own code. To add a second:
+
+```bash
+make pool ARGS="trust anthropic/<a second Claude model id> write_tests review_code"
+```
+
+Set `review.independence: require` in `pool.yaml` to stop runs instead when no second model is approved,
+and `review.mode: advise` to see findings without ever blocking.
+
+**The reviewer is qualified on its own suite.** `qualification/review/` holds diffs it must judge: known-bad
+ones it must block for the right reason, and clean ones it must let through (see
+`qualification/README.md`). The six starter diffs use the hello-node example; add some in your own
+projects' style. The test writer is measured with the code suite, as part of the whole pipeline.
+
+**Cost:** two to three more Claude calls per run (the test writer, the reviewer after each green run, and
+at most one test rewrite). The "fail first" check costs one extra sandbox run and no model calls.
 
 ## Daily use
 
@@ -402,7 +443,7 @@ These need the running stack and are checked by hand in Phase 1:
 
 ## What has been tested, and what has not
 
-Tested in this build (`make test`, 131 tests with `FACTORY_TEST_DSN` set and Docker running; 38 need
+Tested in this build (`make test`, 155 tests with `FACTORY_TEST_DSN` set and Docker running; 38 need
 Postgres and 1 needs Docker):
 routing for all three `local_mode`s, diff validation and forbidden paths, every FSM router, the real
 LangGraph wiring with stubbed nodes (repair loop, 3-repair cap, human gate, tamper halt), the breaker
@@ -421,6 +462,16 @@ and a BSD-syntax `script(1)`: capture, masking, file mode, in-place rewrite, pas
 sign-in and expiry reporting. A real `claude setup-token` sign-in has not been run. The board was run
 against seeded Postgres through its read-only role and checked in Chromium at desktop and phone widths,
 light and dark: no script errors, no sideways scrolling, and a hostile issue title rendered as text.
+
+The independent checks were tested without a real model: reading which new tests failed from **real**
+pytest and Jest output (including a new file that cannot import, and pytest stopping at a collection
+error), the test writer's rules (new files only, every criterion covered), signature extraction hiding
+function bodies, the reviewer's categories decided by the factory and not the model, an unreadable review
+shown as incomplete, model independence (a different model when one is approved, flagged or stopped when
+not), the pipeline's new routes (a review block goes to repair, a review that never clears halts at the
+limit, passing tests go back to the test writer once), and the reviewer suite's scoring. Not exercised:
+real Claude answers for the two new roles, and the JavaScript signature reader on large or unusual
+TypeScript files (it reads declarations line by line).
 
 Projects were tested against Postgres 16: the registry and its refusals, moving `github.yaml` repos
 over, fair turns (a busy project cannot starve a quiet one), per-project caps, the checks at the start

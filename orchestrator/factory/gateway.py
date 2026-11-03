@@ -20,6 +20,12 @@ class TaskKind(StrEnum):
     FORMAT = "format"; LINT_AUTOFIX = "lint_autofix"; IMPORT_SORT = "import_sort"
     RENAME_SYMBOL = "rename_symbol"; PLAN = "plan"; GENERATE = "generate"
     REPAIR = "repair"; SECURITY_FIX = "security_fix"; TRIAGE_CLASSIFY = "triage_classify"
+    WRITE_TESTS = "write_tests"; REVIEW_CODE = "review_code"
+
+
+# Roles whose model wrote the code. The test writer and the reviewer are kept away from these models
+# whenever another qualified model exists (pool.yaml `review.independence`).
+AUTHOR_ROLES = ("generate_remote", "generate", "repair", "security_fix")
 
 
 @dataclass
@@ -61,6 +67,10 @@ def route(t: Task) -> Decision:
         return Decision(Tier.T1_DETERMINISTIC, None, f"kind={t.kind}")
     if t.kind is TaskKind.PLAN:
         return Decision(Tier.T3_REMOTE, "plan", "kind=plan")
+    if t.kind is TaskKind.WRITE_TESTS:
+        return Decision(Tier.T3_REMOTE, "write_tests", "kind=write_tests")
+    if t.kind is TaskKind.REVIEW_CODE:
+        return Decision(Tier.T3_REMOTE, "review_code", "kind=review_code")
     if t.kind is TaskKind.SECURITY_FIX:
         return Decision(Tier.T3_REMOTE, "security_fix", "kind=security_fix")
     if t.escalation_required:
@@ -86,6 +96,7 @@ class TriageGateway:
         self.breaker = breaker
         self.pins = pins             # role -> model_id chosen earlier in THIS run (persisted in state)
         self.pool = pool or get_pool()
+        self.independence: dict[str, str] = {}   # role -> "independent" | "same model as author"
 
     def route(self, t: Task) -> Decision:
         return route(t)
@@ -95,14 +106,41 @@ class TriageGateway:
         self.pins.setdefault(d.role, spec.model_id)                         # pin for the rest of the run
         return Decision(d.tier, d.role, d.reason, spec)
 
-    def complete(self, t: Task, *, run_id: str) -> tuple[str, Decision]:
+    def preselect(self, role: str) -> str | None:
+        """Pin the model a role will use later in this run, without calling it. None if none qualifies."""
+        try:
+            return self.resolve(Decision(Tier.T3_REMOTE, role, "preselect")).model.model_id
+        except NoQualifiedModel:
+            return None
+
+    def _resolve_independent(self, d: Decision, independent_of: tuple[str, ...]) -> Decision:
+        from factory.review import settings
+        authors = tuple({self.pins[r] for r in independent_of if r in self.pins})
+        if not authors:
+            return self.resolve(d)
+        if d.role in self.pins and self.pins[d.role] not in authors:
+            self.independence[d.role] = "independent"
+            return self.resolve(d)
+        try:
+            self.pins.pop(d.role, None)              # an earlier same-model pin must not stick
+            out = self.resolve(d, exclude=authors)
+            self.independence[d.role] = "independent"
+            return out
+        except NoQualifiedModel:
+            if settings()["independence"] == "require":
+                raise BreakerTripped(f"no independent model for role '{d.role}': every qualified model also "
+                                     "wrote the code. Trust a second Claude model, or set review.independence: prefer")
+            self.independence[d.role] = "same model as author"
+            return self.resolve(d)
+
+    def complete(self, t: Task, *, run_id: str, independent_of: tuple[str, ...] = ()) -> tuple[str, Decision]:
         d = self.route(t)
         if d.tier is Tier.T1_DETERMINISTIC:
             raise ValueError("T1 tasks run through the sandbox broker, not an LLM")
         if d.tier is Tier.T2_LOCAL and not self._local_ready(d.role):
             d = self._wait_or_spill(t, d)
         try:
-            d = self.resolve(d)
+            d = self._resolve_independent(d, independent_of) if independent_of else self.resolve(d)
         except NoQualifiedModel as e:
             raise BreakerTripped(f"no qualified model for role '{e.args[0]}'") from e
         return self._call(t, d, run_id, tried=()), d

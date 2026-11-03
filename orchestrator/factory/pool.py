@@ -74,8 +74,9 @@ def match_id(short: str, ids: dict[str, str]) -> str | None:
     return ids[hits[0]] if hits else None
 
 
-SUITE_FOR = {"plan": "code", "generate_remote": "code", "repair": "code", "security_fix": "code",
-             "generate": "code", "classify": "triage", "spillover": "triage"}
+SUITE_FOR = {"plan": "code", "write_tests": "code", "generate_remote": "code", "repair": "code",
+             "security_fix": "code", "generate": "code", "review_code": "review",
+             "classify": "triage", "spillover": "triage"}
 
 
 def suite_dir(role: str) -> pathlib.Path:

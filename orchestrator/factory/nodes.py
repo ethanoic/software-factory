@@ -14,12 +14,12 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
-from factory import depshash, patches, projects, prompts
+from factory import depshash, patches, projects, prompts, review, signatures
 from factory.breaker import PatchRejected, alert
 from factory.config import is_factory_repo, redact
-from factory.gateway import Task, TaskKind
+from factory.gateway import AUTHOR_ROLES, Task, TaskKind
 from factory.obs import trace_url
-from factory.state import (FailureClass, Patch, Plan, QAResult, SandboxResult, Tier, TicketSpec)
+from factory.state import (FailureClass, Patch, Plan, QAResult, RedCheck, SandboxResult, Tier, TicketSpec)
 
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9_./-]{1,100}$")
@@ -102,17 +102,56 @@ def plan(state, deps):
     raw, _ = gw.complete(Task(TaskKind.PLAN, prompts.plan(state["ticket"], patches.repo_map(repo)),
                               max_output_tokens=8_192, node="plan"), run_id=state["run_id"])
     try:
-        p = Plan(**_json(raw))
+        data = _json(raw)
+        p = Plan(**{k: data[k] for k in ("summary", "target_files", "acceptance_criteria", "complexity") if k in data})
         for f in p.target_files:
             patches.validate_repo_path(f)
-        for f in p.test_files:
-            if not patches.validate_repo_path(f).startswith("tests/"):
-                raise PatchRejected(f"test file outside tests/: {f}")
-        if set(p.test_files) != set(p.test_sources):
-            raise PatchRejected("test_files and test_sources keys differ")
+        if not p.acceptance_criteria:
+            raise ValueError("no acceptance criteria")
     except Exception as e:                       # invalid plan: halt, a human looks at it
         return {"halt_reason": f"plan invalid: {e}"[:500], "model_pins": gw.pins}
     return {"plan": p, "model_pins": gw.pins}
+
+
+# ------------------------------------------------------------------ WRITE_TESTS (Claude, independent)
+def _check_tests(p: Plan, data: dict, repo: pathlib.Path) -> Plan:
+    files, sources = list(data.get("test_files") or []), dict(data.get("test_sources") or {})
+    if not files or set(files) != set(sources):
+        raise PatchRejected("test_files and test_sources must name the same, non-empty set of files")
+    for f in files:
+        if not patches.validate_repo_path(f).startswith("tests/"):
+            raise PatchRejected(f"test file outside tests/: {f}")
+        if (repo / f).exists():
+            raise PatchRejected(f"{f} already exists; tests must be new files")
+    mapping = {str(k).strip(): v for k, v in (data.get("criteria_tests") or {}).items()}
+    missing = [c for c in p.acceptance_criteria if not mapping.get(c.strip())]
+    if missing:
+        raise PatchRejected("no test for: " + "; ".join(missing)[:600])
+    return p.model_copy(update={"test_files": files, "test_sources": sources,
+                                "criteria_tests": {c: list(mapping[c.strip()]) for c in p.acceptance_criteria}})
+
+
+def write_tests(state, deps):
+    """A different model from the code author writes the tests, from the criteria and signatures only."""
+    repo, p, t = deps.repo_path(state), state["plan"], state["ticket"]
+    gw = deps.gateway_for(state)
+    gw.preselect("generate_remote")              # know the code author now, so the test writer can differ
+    feedback = state.get("tests_feedback")
+    sigs = signatures.signatures(repo, p.target_files, t.language)
+    style = signatures.test_style(repo, t.language)
+    for attempt in (1, 2):                       # one immediate retry for a malformed or incomplete answer
+        raw, d = gw.complete(Task(TaskKind.WRITE_TESTS, prompts.write_tests(t, p, sigs, style, feedback),
+                                  max_output_tokens=8_192, node=f"write_tests#{attempt}"),
+                             run_id=state["run_id"], independent_of=AUTHOR_ROLES)
+        try:
+            new_plan = _check_tests(p, _json(raw), repo)
+            break
+        except (PatchRejected, ValueError, json.JSONDecodeError) as e:
+            feedback = str(e)
+            if attempt == 2:
+                return {"halt_reason": f"tests invalid: {e}"[:500], "model_pins": gw.pins}
+    return {"plan": new_plan, "tests_feedback": None, "model_pins": gw.pins,
+            "independence": {**(state.get("independence") or {}), **gw.independence}}
 
 
 # ------------------------------------------------------------------ FREEZE_TESTS (T1)
@@ -227,24 +266,86 @@ def write_results(dest: pathlib.Path, files: dict) -> pathlib.Path:
     return dest
 
 
-def sandbox(state, deps):
+def _run_sandbox(state, deps, diff: str | None, results_dir: str) -> tuple[dict | None, pathlib.Path | None, str | None]:
+    """Run the frozen tests against the base code plus `diff` (None = unchanged code) in the sealed
+    runner. Returns (broker reply, results folder, halt reason)."""
     run_dir, repo = deps.run_dir(state), deps.repo_path(state)
     patches.reset_to_base(repo, state["base_sha"])
-    patches.apply_patch(repo, state["patch"].unified_diff)
+    if diff:
+        patches.apply_patch(repo, diff)
     try:
         source = patches.source_archive(repo)
     except PatchRejected as e:                          # the repo itself, not the patch: a human must look
-        return {"halt_reason": f"sandbox environment: {e}"}
+        return None, None, f"sandbox environment: {e}"
     req = {"run_id": state["run_id"], "language": state["ticket"].language,
            "source_tar_b64": base64.b64encode(source).decode(),
            "tests_tar_b64": base64.b64encode(patches.dir_archive(run_dir / "frozen")).decode(),
-           "changed_files": patches.changed_files(state["patch"].unified_diff),
+           "changed_files": patches.changed_files(diff) if diff else [],
            "image": state.get("runner_image")}
     resp = httpx.post(f"{deps.broker_url}/run", timeout=420, json=req)
     if resp.status_code >= 400:
-        return {"halt_reason": f"sandbox environment: broker refused the run ({resp.status_code} {resp.text[:300]})"}
+        return None, None, f"sandbox environment: broker refused the run ({resp.status_code} {resp.text[:300]})"
     broker = resp.json()
-    results = write_results(run_dir / "results", broker.get("files"))
+    return broker, write_results(run_dir / results_dir, broker.get("files")), None
+
+
+def new_test_outcome(results: pathlib.Path, new_files: list[str]) -> tuple[int, int]:
+    """(tests found, tests failed) among the NEW test files only, from junit.xml (pytest) or jest.json.
+    An error that stops a new file from loading (say, it imports a function that does not exist yet)
+    counts as one failure: the tests do fail on the current code."""
+    total = failed = 0
+    junit, jest = results / "junit.xml", results / "jest.json"
+    if junit.exists():
+        mods = {f.removesuffix(".py").replace("/", ".") for f in new_files}
+        for case in ET.parse(junit).getroot().iter("testcase"):
+            cls, name, file = case.get("classname", ""), case.get("name", ""), case.get("file", "")
+            mine = file in new_files or any(cls == m or cls.startswith(m + ".") or (not cls and name == m)
+                                            for m in mods)
+            if not mine or case.find("skipped") is not None:
+                continue
+            total += 1
+            failed += case.find("failure") is not None or case.find("error") is not None
+    elif jest.exists():
+        for suite in json.loads(jest.read_text() or "{}").get("testResults", []):
+            path = str(suite.get("name", ""))
+            if not any(path.endswith("/" + f) or path == f for f in new_files):
+                continue
+            cases = suite.get("assertionResults") or []
+            if not cases:                                # the file did not load at all
+                total += 1
+                failed += suite.get("status") == "failed"
+                continue
+            for c in cases:
+                if c.get("status") in ("passed", "failed"):
+                    total += 1
+                    failed += c.get("status") == "failed"
+    return total, failed
+
+
+def red_check(state, deps):
+    """No model: run the new tests against the UNCHANGED code. Tests that already pass do not test the
+    change, so at least one must fail. Otherwise they go back to the test writer once, then the run stops."""
+    p = state["plan"]
+    broker, results, halt = _run_sandbox(state, deps, None, "red")
+    if halt:
+        return {"halt_reason": halt}
+    total, failed = new_test_outcome(results, p.test_files)
+    rc = RedCheck(new_tests=total, new_failed=failed,
+                  detail=f"{failed} of {total} new tests fail on the current code")
+    if failed >= 1:
+        return {"red_check": rc}
+    why = ("none of the new tests ran: check the file names (tests/test_*.py or tests/*.test.js) and imports"
+           if total == 0 else f"all {total} new tests already pass on the current code, so they do not test the change")
+    if state.get("test_revisions", 0) >= 1:
+        return {"red_check": rc, "halt_reason": f"tests do not fail on the current code: {why}"}
+    return {"red_check": rc, "tests_feedback": why, "test_revisions": state.get("test_revisions", 0) + 1}
+
+
+def sandbox(state, deps):
+    run_dir = deps.run_dir(state)
+    broker, results, halt = _run_sandbox(state, deps, state["patch"].unified_diff, "results")
+    if halt:
+        return {"halt_reason": halt}
     hash_ok = tree_sha256(run_dir / "frozen") == state["tests_sha256"]
     fc, passed, failed, lint, excerpt = classify_failure(results, broker)
     if not hash_ok:
@@ -278,6 +379,25 @@ def qa(state, deps):
             medium = sum(m.get("severity") == 1 for m in msgs)
             report = json.dumps([{k: m.get(k) for k in ("file", "line", "ruleId", "message")} for m in msgs][:40])
     return {"qa": QAResult(high_findings=high, medium_findings=medium, report_excerpt=report[:4000])}
+
+
+# ------------------------------------------------------------------ REVIEW_CODE (Claude, independent)
+def review_code(state, deps):
+    """A model other than the code author reviews the diff. It reports findings; the factory decides which
+    block (pool.yaml `review`). It can send the change back to repair, never approve it."""
+    if state.get("qualification"):
+        return {"review": None}                 # reviewers are measured by their own suite
+    p, t = state["plan"], state["ticket"]
+    gw = deps.gateway_for(state)
+    sb = state.get("sandbox")
+    raw, d = gw.complete(Task(TaskKind.REVIEW_CODE,
+                              prompts.review_code(t, p, state["patch"].unified_diff, sb.passed if sb else 0, p.test_files),
+                              max_output_tokens=4_096, node=f"review_code#{state.get('repair_attempts', 0)}"),
+                         run_id=state["run_id"], independent_of=AUTHOR_ROLES)
+    independent = gw.independence.get("review_code", "independent") == "independent"
+    rv = review.parse(raw, model=d.model.model_id, independent=independent)
+    return {"review": rv, "model_pins": gw.pins,
+            "independence": {**(state.get("independence") or {}), **gw.independence}}
 
 
 # ------------------------------------------------------------------ REPAIR (Claude, or one local syntax retry)
@@ -323,7 +443,7 @@ def repair(state, deps):
               "failure_class": sb.failure_class.value if sb else "none",
               "diff_stat": patches.git(repo, "apply", "--stat", "-", input=diff.encode()).stdout.decode()[:1500]}
     return {"patch": Patch(unified_diff=diff, produced_by=d.tier, model=d.model.model_id),
-            "repair_attempts": n, "qa": None, "model_pins": gw.pins, "attempts": [record]}
+            "repair_attempts": n, "qa": None, "review": None, "model_pins": gw.pins, "attempts": [record]}
 
 
 # ------------------------------------------------------------------ COMPILE_PR (T1, human-gated)
@@ -352,7 +472,12 @@ def compile_pr(state, deps):
     body = (f"{closes}Automated change for **{t.ticket_id}**.\n\n{state['plan'].summary}\n\n"
             "**Acceptance criteria**\n" + "\n".join(f"- {c}" for c in state["plan"].acceptance_criteria) +
             f"\n\n**Run**: `{state['run_id']}` · repairs: {state.get('repair_attempts', 0)} · "
-            f"billed cost: ${spent:.4f} · models: {json.dumps(state.get('model_pins', {}))}\n"
+            f"billed cost: ${spent:.4f} · models: {json.dumps(state.get('model_pins', {}))}\n\n"
+            f"**Checks**: {state['red_check'].detail if state.get('red_check') else 'tests-fail-first check not run'} "
+            f"before the change; tests written by "
+            f"{(state.get('model_pins') or {}).get('write_tests', '?')} "
+            f"({(state.get('independence') or {}).get('write_tests', 'independence unknown')}).\n\n"
+            f"{review.summary(state.get('review'))}\n\n"
             + (f"**Trace**: {trace_url(state['run_id'])}\n" if trace_url(state["run_id"]) else ""))
     r = httpx.post(f"https://api.github.com/repos/{t.repo}/pulls", timeout=30,
                    headers={"Authorization": f"Bearer {deps.github_token()}",
@@ -377,6 +502,9 @@ def halt(state):
             reason = f"sandbox {sb.failure_class.value}: needs a human"
         elif qa_ is not None and qa_.high_findings:
             reason = f"repair limit reached with {qa_.high_findings} high security findings"
+        elif state.get("review") is not None and state["review"].blocked:
+            cats = sorted({f.category for f in state["review"].findings if f.blocking})
+            reason = f"repair limit reached: the independent review still blocks ({', '.join(cats)})"
         else:
             reason = f"repair limit reached ({state.get('repair_attempts', 0)} cycles)"
     if not reason.startswith(("breaker:", "triage rejected")):

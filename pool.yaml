@@ -34,6 +34,8 @@ local_mode: assist        # off | assist | generate
 
 roles:                    # labs: [] = any eligible lab; the pool picks the best qualified model within it
   plan:            { tier: t3, labs: [anthropic], min_score: 0.70, rank: quality }
+  write_tests:     { tier: t3, labs: [anthropic], min_score: 0.60, rank: quality }   # never the code author's model if another qualifies
+  review_code:     { tier: t3, labs: [anthropic], min_score: 0.80, rank: quality }   # scored on qualification/review
   generate_remote: { tier: t3, labs: [anthropic], min_score: 0.60, rank: quality_per_dollar }
   repair:          { tier: t3, labs: [anthropic], min_score: 0.60, rank: quality }
   security_fix:    { tier: t3, labs: [anthropic], min_score: 0.70, rank: quality }
@@ -47,5 +49,13 @@ qualification:
   promote_margin: 0.05                 # challenger must beat incumbent pass@1 by 5 points
   requalify_days: 30
   promotions_require_approval: true    # python -m factory.pool_worker promote <model> <role>
+
+# Independent review (README "Independent checks"). The reviewer reports findings by category; the
+# factory decides which block. Blocking sends the change back to repair; nothing here can approve a run.
+review:
+  mode: block                          # block | advise (advise: findings only shown to you, never block)
+  block_categories: [scope, secrets, network, disabled_checks, test_or_tool_config, obfuscation]
+  independence: prefer                 # prefer: use another model when one qualifies, else say so
+                                       # require: stop the run unless the test writer and reviewer differ
 
 pins: {}                               # optional manual preference, e.g. { plan: "anthropic/<model>" }

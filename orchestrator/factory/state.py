@@ -28,8 +28,9 @@ class Plan(BaseModel):
     summary: str
     target_files: list[str]             # relative to the repo root, validated by validate_repo_path()
     acceptance_criteria: list[str]
-    test_files: list[str]               # paths under tests/, written in PLAN, frozen in FREEZE_TESTS
+    test_files: list[str] = Field(default_factory=list)   # paths under tests/, written by WRITE_TESTS
     test_sources: dict[str, str] = Field(default_factory=dict)
+    criteria_tests: dict[str, list[str]] = Field(default_factory=dict)   # criterion -> test names (WRITE_TESTS)
     complexity: Literal["trivial", "routine", "complex"]
 
 
@@ -59,6 +60,32 @@ class SandboxResult(BaseModel):
     tests_hash_ok: bool = True
 
 
+class RedCheck(BaseModel):
+    """The new tests run against the unchanged code (no model involved). At least one must fail."""
+    new_tests: int
+    new_failed: int
+    detail: str = Field(default="", max_length=2_000)
+
+
+class Finding(BaseModel):
+    category: str                       # see review.BLOCK_CATEGORIES and ADVISE_CATEGORIES
+    file: str = ""
+    detail: str = Field(default="", max_length=600)
+    blocking: bool = False              # decided by the factory from the category, never by the model
+
+
+class Review(BaseModel):
+    """Independent code review. The reviewer can block a run; it can never approve one."""
+    model: str
+    independent: bool                   # False when no model other than the code author was qualified
+    completed: bool = True              # False when the reviewer's answer could not be read
+    findings: list[Finding] = Field(default_factory=list)
+
+    @property
+    def blocked(self) -> bool:
+        return any(f.blocking for f in self.findings)
+
+
 class QAResult(BaseModel):
     high_findings: int
     medium_findings: int
@@ -84,4 +111,9 @@ class FactoryState(TypedDict, total=False):
     dry_run: bool                       # qualification runs: no push, no PR
     qualification: bool                 # skips triage; every code role pinned to the candidate
     runner_image: str | None            # the project's runner image (set by ingest)
+    red_check: RedCheck | None          # new tests against the unchanged code
+    test_revisions: int                 # times the tests went back to the test writer (max 1)
+    tests_feedback: str | None          # why they went back
+    review: Review | None               # latest independent code review
+    independence: dict[str, str]        # role -> "independent" | "same model as author"
     attempts: Annotated[list[dict], operator.add]   # one record per repair attempt, fed back to the model

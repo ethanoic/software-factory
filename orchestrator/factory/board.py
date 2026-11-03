@@ -36,10 +36,10 @@ STATIONS = [
     ("queued", "Queued", ()),
     ("triage", "Triage", ("ingest", "triage")),
     ("plan", "Plan", ("plan",)),
-    ("tests", "Tests", ("freeze_tests",)),
+    ("tests", "Tests", ("write_tests", "freeze_tests", "red_check")),
     ("code", "Code", ("generate",)),
     ("sandbox", "Sandbox", ("sandbox",)),
-    ("qa", "Checks", ("qa",)),
+    ("qa", "Checks", ("qa", "review_code")),
     ("repair", "Repair", ("repair",)),
     ("approval", "Your approval", ()),
     ("review", "PR review", ()),
@@ -106,6 +106,17 @@ HALT_RULES = [
     (r"sandbox environment", "The test runner is missing a tool or dependency, or found no tests.",
      [step("Rebuild this project's runner image with its current dependencies.",
            command="make project-rebuild REPO=<owner/name>")]),
+    (r"tests do not fail on the current code", "The new tests already pass without any change, so they would not prove the ticket was done.",
+     [step("Make the acceptance criteria describe behaviour the code does not have yet (input and expected output), then retry.")]),
+    (r"tests invalid", "The test writer did not produce usable tests (or left a criterion untested).",
+     [step("Make each acceptance criterion concrete and testable, then retry.")]),
+    (r"no independent model", "Only one model is approved, so it would have reviewed its own code.",
+     [step("Approve a second Claude model for the reviewer and test writer:",
+           command='make pool ARGS="trust <another Claude model id> write_tests review_code"'),
+      step("Or allow the same model, flagged on every run: set review.independence: prefer in pool.yaml.")]),
+    (r"independent review still blocks", "Three repairs did not satisfy the independent reviewer.",
+     [step("Read the findings with make diff, then fix the ticket or the code yourself.",
+           command="make diff RUN=<run id>")]),
     (r"sandbox tamper", "The frozen acceptance tests changed during the run.",
      [step("Look at the trace before retrying: something wrote to the tests the factory is not allowed to change.")]),
     (r"plan invalid", "The planning step returned something unusable.",
@@ -135,6 +146,9 @@ def card_action(card: dict) -> dict | None:
         repairs = card["repair_attempts"]
         why = ("The new tests and the security scan passed"
                + (f" after {repairs} repair{'s' if repairs != 1 else ''}." if repairs else " on the first try."))
+        checks = card.get("detail") or ""
+        if checks:
+            why += " " + checks.replace("\n", " ")
         steps = [step("Read the exact change first. Tests passing does not prove the code is safe.",
                       command=f"make diff RUN={card['id']}")]
         if card["trace_url"]:
