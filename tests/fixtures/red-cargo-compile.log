@@ -1,0 +1,10 @@
+   Compiling hello_factory v0.1.0 (/workspace)
+error[E0432]: unresolved import `hello_factory::shout`
+ --> tests/shout.rs:1:5
+  |
+1 | use hello_factory::shout;
+  |     ^^^^^^^^^^^^^^^^^^^^ no `shout` in the root
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `hello_factory` (test "shout") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: command `/root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo '--color=never' test --no-run '--message-format=json-render-diagnostics' --offline` exited with code 101

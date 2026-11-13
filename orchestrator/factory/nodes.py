@@ -207,6 +207,8 @@ def _parse_results(out: pathlib.Path) -> tuple[int, int]:
         total = sum(int(s.get("tests", 0)) for s in suites)
         bad = sum(int(s.get("failures", 0)) + int(s.get("errors", 0)) for s in suites)
         skipped = sum(int(s.get("skipped", 0)) for s in suites)
+        bad += sum(_proved_nothing(c) and c.find("failure") is None and c.find("error") is None
+                   for c in root.iter("testcase"))
         return total - bad - skipped, bad
     if jest.exists():
         j = json.loads(jest.read_text() or "{}")
@@ -227,24 +229,47 @@ def _lint_errors(out: pathlib.Path) -> int:
     return sum(int(x.get("errorCount", 0)) for x in data) if isinstance(data, list) else 0  # eslint
 
 
+# A missing tool, dependency or test framework: the runner image is wrong, not the code. Halt, never repair.
+ENVIRONMENT_RE = re.compile(
+    r"ModuleNotFoundError: No module named|Cannot find module '(?!\.)|ERR_MODULE_NOT_FOUND|"
+    r"could not determine executable to run|: command not found|factory: [\w-]+ not (installed|found)|"
+    r"factory: (unsupported|no supported) |No tests found, exiting with code|"
+    r"attempting to make an HTTP request, but --offline|no matching package named|failed to select a version|"
+    r"failed to load source for dependency|Could not resolve dependencies for project|"
+    r"Cannot access \S+ in offline mode|Plugin \S+ or one of its dependencies could not be resolved")
+# The code (or a test) does not compile or parse: a syntax-class failure the model can repair.
+SYNTAX_RE = re.compile(r"SyntaxError|IndentationError|Parsing error|TS\d{4}:|error\[E\d{4}\]|"
+                       r"error: (expected|unexpected|mismatched)|COMPILATION ERROR|Parse Error:|"
+                       r"Parser Error:|Compile Error:")
+# Compile errors that only mean "the thing the test uses does not exist yet". A new test that fails this
+# way does fail on the current code, which is what the red check wants to see.
+MISSING_SYMBOL_RE = re.compile(
+    r"error\[E0(425|432|433|412|422|599|061|560|609|616)\]|cannot find symbol|does not exist|"
+    r"cannot be applied to|is not abstract and does not override|"
+    r"not (found|declared) in (base|the current scope)|Identifier \"?\w+\"? not declared|"
+    r"Could not find type|Function \"?\w+\"? not found|Could not preload resource|"
+    r"Cannot get class|Invalid call\. Nonexistent function")
+
+
 def classify_failure(out: pathlib.Path, broker: dict) -> tuple[FailureClass, int, int, int, str]:
     if broker.get("timed_out"):
         return FailureClass.TIMEOUT, 0, 0, 0, broker.get("log_tail", "")
     log = (out / "test.log").read_text(errors="replace") if (out / "test.log").exists() else broker.get("log_tail", "")
-    if re.search(r"ModuleNotFoundError: No module named|Cannot find module '(?!\.)|ERR_MODULE_NOT_FOUND|"
-                 r"could not determine executable to run|: command not found|factory: jest not installed|"
-                 r"No tests found, exiting with code", log):   # frozen tests the runner cannot find: a human must look
+    if ENVIRONMENT_RE.search(log):                        # frozen tests the runner cannot find: a human must look
         return FailureClass.ENVIRONMENT, 0, 0, 0, log     # missing tool or dependency: rebuild the runner image
     try:
-        test_exit = json.loads((out / "result.json").read_text()).get("test_exit")
-    except (OSError, ValueError):
-        test_exit = None
-    # pytest: 3 internal error, 4 usage error, 5 no tests collected -> the harness, not the model, is wrong
-    if test_exit in (3, 4, 5) and not (out / "jest.json").exists():
+        result = json.loads((out / "result.json").read_text())
+        test_exit, runner = result.get("test_exit"), result.get("runner")
+    except (OSError, ValueError, AttributeError):
+        test_exit = runner = None
+    # pytest: 3 internal error, 4 usage error, 5 no tests collected -> the harness, not the model, is wrong.
+    # Older runner images do not report `runner`; for them, "not Jest" meant pytest.
+    is_pytest = runner == "python" or (runner is None and not (out / "jest.json").exists())
+    if is_pytest and test_exit in (3, 4, 5):
         return FailureClass.ENVIRONMENT, 0, 0, 0, log
     lint = _lint_errors(out)
     passed, failed = _parse_results(out)
-    if re.search(r"SyntaxError|IndentationError|Parsing error|TS\d{4}:", log):
+    if SYNTAX_RE.search(log):
         return FailureClass.SYNTAX, passed, failed, lint, log
     if failed or (passed == 0 and broker.get("exit_code", 0) != 0):
         return FailureClass.ASSERTION, passed, failed, lint, log
@@ -296,15 +321,11 @@ def new_test_outcome(results: pathlib.Path, new_files: list[str]) -> tuple[int, 
     total = failed = 0
     junit, jest = results / "junit.xml", results / "jest.json"
     if junit.exists():
-        mods = {f.removesuffix(".py").replace("/", ".") for f in new_files}
         for case in ET.parse(junit).getroot().iter("testcase"):
-            cls, name, file = case.get("classname", ""), case.get("name", ""), case.get("file", "")
-            mine = file in new_files or any(cls == m or cls.startswith(m + ".") or (not cls and name == m)
-                                            for m in mods)
-            if not mine or case.find("skipped") is not None:
+            if not _case_in(case, new_files) or case.find("skipped") is not None:
                 continue
             total += 1
-            failed += case.find("failure") is not None or case.find("error") is not None
+            failed += case.find("failure") is not None or case.find("error") is not None or _proved_nothing(case)
     elif jest.exists():
         for suite in json.loads(jest.read_text() or "{}").get("testResults", []):
             path = str(suite.get("name", ""))
@@ -319,7 +340,49 @@ def new_test_outcome(results: pathlib.Path, new_files: list[str]) -> tuple[int, 
                 if c.get("status") in ("passed", "failed"):
                     total += 1
                     failed += c.get("status") == "failed"
+    if total == 0:
+        total, failed = _compile_failures(results, new_files)
     return total, failed
+
+
+def _proved_nothing(case) -> bool:
+    """GUT reports a test that never reached an assertion (say, it called a function that does not exist:
+    a runtime error in GDScript, not a compile error) as passing with status "no asserts" or "risky".
+    A test that proves nothing is not a pass."""
+    return case.get("status") in ("no asserts", "risky")
+
+
+def _case_in(case, new_files: list[str]) -> bool:
+    """Does a JUnit testcase come from one of the new test files? Each runner names cases differently:
+    pytest by module (tests.test_x) or file, Surefire by Java class (com.acme.GreeterTest), nextest by
+    test binary (crate::test_x), GUT by script path (res://tests/test_x.gd)."""
+    cls, name, file = case.get("classname", ""), case.get("name", ""), case.get("file", "")
+    if file in new_files:
+        return True
+    for f in new_files:
+        stem = pathlib.PurePosixPath(f).stem
+        mod = f.removesuffix(".py").replace("/", ".")
+        if f.endswith(".py") and (cls == mod or cls.startswith(mod + ".") or (not cls and name == mod)):
+            return True
+        if f.endswith(".java") and (cls == stem or cls.endswith("." + stem)):
+            return True
+        if f.endswith(".rs") and (cls == stem or cls.endswith("::" + stem)):
+            return True
+        if f.endswith(".gd") and (cls.endswith("/" + f) or cls == f or cls == "res://" + f):
+            return True
+    return False
+
+
+def _compile_failures(results: pathlib.Path, new_files: list[str]) -> tuple[int, int]:
+    """Compiled languages build every test together, so a new test that calls a function that does not
+    exist yet stops the build and no report is written. Count each new file that a missing-symbol error
+    names as one failed test. Any other compile error counts as nothing ran, which sends the tests back."""
+    log_file = results / "test.log"
+    log = log_file.read_text(errors="replace") if log_file.exists() else ""
+    if not MISSING_SYMBOL_RE.search(log):
+        return 0, 0
+    named = [f for f in new_files if pathlib.PurePosixPath(f).name in log]
+    return len(named), len(named)
 
 
 def red_check(state, deps):
@@ -401,7 +464,7 @@ def review_code(state, deps):
 
 
 # ------------------------------------------------------------------ REPAIR (Claude, or one local syntax retry)
-TRACE_PATH = re.compile(r"([A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|mjs|cjs))")
+TRACE_PATH = re.compile(r"([A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|mjs|cjs|rs|java|gd))")
 
 
 def mentioned_files(repo: pathlib.Path, log: str) -> list[str]:
@@ -409,11 +472,11 @@ def mentioned_files(repo: pathlib.Path, log: str) -> list[str]:
     absolute paths (/workspace/src/x.js); those are mapped back, and anything outside the repo is dropped."""
     out = set()
     for m in TRACE_PATH.findall(log or ""):
-        for prefix in (f"{repo}/", "/workspace/"):
+        for prefix in (f"{repo}/", "/workspace/", "//"):     # "//": Godot's res://, after the scheme
             if m.startswith(prefix):
                 m = m[len(prefix):]
         m = m.removeprefix("./")
-        if m.startswith(("/", "node_modules/", ".factory/", ".git/")):
+        if m.startswith(("/", "node_modules/", ".factory/", ".git/", "target/", "addons/gut/")):
             continue
         try:
             patches.validate_repo_path(m)

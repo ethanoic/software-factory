@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="GutTests" failures="0" tests="3" >
+  <testsuite name="tests/test_greeter.gd" tests="2" failures="0" skipped="0" time="0.000234" >
+      <testcase name="test_greets_the_world_by_default" assertions="1" status="pass" classname="tests/test_greeter.gd" time="0.000149" >
+      </testcase>
+      <testcase name="test_greets_by_name" assertions="1" status="pass" classname="tests/test_greeter.gd" time="0.000085" >
+      </testcase>
+      </testsuite>
+  <testsuite name="tests/test_shout.gd" tests="1" failures="0" skipped="0" time="0.000101" >
+      <testcase name="test_shouts_the_name" assertions="0" status="no asserts" classname="tests/test_shout.gd" time="0.000101" >
+      </testcase>
+      </testsuite>
+  </testsuites>

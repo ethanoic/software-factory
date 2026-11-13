@@ -27,13 +27,20 @@ rebuild() {
   hash=$(cat "$dir/deps/.deps-hash"); lang=$(cat "$dir/deps/.language"); image=$(cat "$dir/deps/.image")
   rm -f "$dir/deps/.deps-hash" "$dir/deps/.language" "$dir/deps/.image" "$dir/deps.tar"
   cp runner-images/entrypoint.sh "$dir/"
-  if [ "$lang" = python ]; then
-    cp runner-images/python/Dockerfile "$dir/"
-  else
-    mkdir -p "$dir/typescript"
-    cp runner-images/typescript/Dockerfile "$dir/"
-    cp runner-images/typescript/eslint.security.mjs "$dir/typescript/"
-  fi
+  case "$lang" in
+    python) cp runner-images/python/Dockerfile "$dir/" ;;
+    node|javascript|typescript)
+      mkdir -p "$dir/typescript"
+      cp runner-images/typescript/Dockerfile "$dir/"
+      cp runner-images/typescript/eslint.security.mjs "$dir/typescript/" ;;
+    rust)
+      mkdir -p "$dir/rust"
+      cp runner-images/rust/Dockerfile "$dir/"
+      cp runner-images/rust/nextest.toml "$dir/rust/" ;;
+    java)  cp runner-images/java/Dockerfile "$dir/" ;;
+    godot) cp runner-images/godot/Dockerfile "$dir/" ;;
+    *) echo "error: no runner for language '$lang'" >&2; exit 1 ;;
+  esac
   echo "==> $repo: building $image ($(ls "$dir/deps" | tr '\n' ' '))"
   docker build -q --label "factory.project=$repo" -t "$image" "$dir" > /dev/null
   docker run --rm --network none --entrypoint test "$image" -x /opt/factory/entrypoint.sh \
@@ -44,7 +51,7 @@ rebuild() {
 cmd=${1:-}; shift || true
 case "$cmd" in
   add)
-    [ $# -ge 2 ] || { echo "usage: make project-add REPO=owner/name LANGUAGE=python|javascript|typescript [BRANCH=main] [MAX_RUNS=n]" >&2; exit 1; }
+    [ $# -ge 2 ] || { echo "usage: make project-add REPO=owner/name LANGUAGE=python|node|rust|java|godot [BRANCH=main] [MAX_RUNS=n]" >&2; exit 1; }
     need_factory
     args=("$1" --language "$2" --branch "${3:-main}")
     [ -n "${4:-}" ] && args+=(--max-runs-per-day "$4")

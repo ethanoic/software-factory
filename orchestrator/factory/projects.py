@@ -4,7 +4,7 @@ A project is ready to take tickets when it is active and has a runner image buil
 dependency files. Tickets for repos that are not registered are refused.
 
   python -m factory.projects list
-  python -m factory.projects add <owner/name> --language javascript [--branch main] [--max-runs-per-day 2]
+  python -m factory.projects add <owner/name> --language node [--branch main] [--max-runs-per-day 2]
   python -m factory.projects pause|resume|remove <owner/name>
   python -m factory.projects limit <owner/name> <n|none>
   python -m factory.projects labelers <owner/name> [login ...]
@@ -32,7 +32,7 @@ from factory.config import is_factory_repo
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9_./-]{1,100}$")
 LOGIN_RE = re.compile(r"^[A-Za-z0-9-]{1,39}$")
-LANGUAGES = ("python", "javascript", "typescript")
+LANGUAGES = depshash.LANGUAGES
 IMAGE_RE = re.compile(r"^factory-runner-[a-z0-9][a-z0-9-]{0,62}:[a-f0-9]{12}$")
 COLS = ("repo", "base_branch", "language", "status", "labelers", "max_runs_per_day", "runner_image",
         "deps_hash", "image_built_at")
@@ -205,7 +205,7 @@ def deps_archive(repo: str, project: Project, runs_root: pathlib.Path, auth_env:
 # ------------------------------------------------------------------ CLI
 def _print(projects: list[Project]) -> None:
     if not projects:
-        print("No projects yet. Add one: make project-add REPO=owner/name LANGUAGE=javascript")
+        print("No projects yet. Add one: make project-add REPO=owner/name LANGUAGE=node")
         return
     print(f"{'PROJECT':<40} {'STATE':<10} {'LANGUAGE':<11} {'BRANCH':<12} {'RUNS/DAY':<9} RUNNER IMAGE")
     for p in projects:

@@ -46,7 +46,7 @@ tokens) so its repository access includes `factory-hello-node`, with these permi
 The factory works only on repos registered as projects. One command registers it and builds its test runner:
 
 ```bash
-make project-add REPO=ethanoic/factory-hello-node LANGUAGE=javascript
+make project-add REPO=ethanoic/factory-hello-node LANGUAGE=node
 make project-list                 # should show it active, with a factory-runner-ethanoic-factory-hello-node image
 ```
 

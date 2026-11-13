@@ -12,8 +12,9 @@ import tarfile
 from factory.breaker import PatchRejected
 
 FORBIDDEN = re.compile(
-    r"^(\+\+\+|---) [ab]/(tests/|\.github/|.*(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|uv\.lock|"
-    r"poetry\.lock|requirements[^/]*\.txt|pyproject\.toml|package\.json)$)", re.M)
+    r"^(\+\+\+|---) [ab]/(tests/|\.github/|addons/gut/|.*(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|"
+    r"uv\.lock|poetry\.lock|requirements[^/]*\.txt|pyproject\.toml|package\.json|Cargo\.toml|Cargo\.lock|"
+    r"pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|\.godot-version)$)", re.M)
 FENCE = re.compile(r"```(?:diff|patch)?[ \t]*\n(.*?)```", re.S)
 SAFE_PATH = re.compile(r"^(?!/)(?!.*\.\.)[A-Za-z0-9_.\-/]{1,200}$")
 
