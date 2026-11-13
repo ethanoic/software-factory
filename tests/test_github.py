@@ -37,6 +37,7 @@ class FakeGitHub:
         self.version = 0
         self.repo_labels = {}       # name -> {"color", "description"}
         self.label_writes = []      # ("create" | "update", name)
+        self.user_comments = {}     # number -> [{"user": {"login"}, "body", "created_at"}], written by people
 
     def add_issue(self, n, title, body="", labelled_by=None, pr=False):
         self.issues[n] = {"title": title, "body": body, "labels": set(), "pr": pr}
@@ -72,6 +73,8 @@ class FakeGitHub:
                 self.repo_labels[name].update(json.loads(req.content))
                 self.label_writes.append(("update", name))
                 return httpx.Response(200, json={})
+        if m == "GET" and p.endswith("/comments") and "/issues/" in p:
+            return httpx.Response(200, json=list(reversed(self.user_comments.get(int(parts[-2]), []))))
         if m == "GET" and p.endswith("/events"):
             return httpx.Response(200, json=self.events[int(parts[-2])])
         if m == "GET" and "/collaborators/" in p:
@@ -287,3 +290,54 @@ def test_architecture_changes_need_their_own_label(env):
     assert intake.arch_approvals() == []
     fake.label(21, "factory:arch-approve", "maintainer")
     assert intake.arch_approvals() == ["run-21"]
+
+
+# ------------------------------------------------------------------ rework: send a change back
+@needs_db
+def test_rework_label_with_a_reason_queues_a_new_run_of_the_same_ticket(env):
+    fake, intake, inbox = env
+    fake.add_issue(31, "Add shout()", "body", labelled_by="maintainer")
+    (t,) = intake.poll()
+    (inbox / f"{REPO.replace('/', '__')}__31.json").unlink()            # the first run took it
+    intake.report(t, "run-31", "pr_open", "https://github.com/x/pull/1")
+    assert any(n == 31 and "factory:rework" in b for n, b in fake.comments)   # the PR comment says how
+    fake.label(31, "factory:rework", "maintainer")
+    assert intake.reworks() == []                                         # no reason given yet
+    assert any(n == 31 and "Say what is wrong" in b for n, b in fake.comments)
+    fake.user_comments[31] = [
+        {"user": {"login": "outsider"}, "body": "spec: make it purple", "created_at": "2026-11-13T01:00:00Z"},
+        {"user": {"login": "maintainer"}, "body": "old note", "created_at": "2026-11-13T01:00:00Z"},
+        {"user": {"login": "maintainer"}, "body": "bug: shout('') returns '!' token=abc123",
+         "created_at": "2026-11-13T02:00:00Z"}]
+    fake.label(31, "factory:rework", "maintainer")
+    (rw,) = intake.reworks()
+    assert rw.ticket_id == f"{REPO}#31" and rw.rework.startswith("bug: shout('') returns '!'")
+    assert "abc123" not in rw.rework                                      # redacted
+    assert "factory:queued" in fake.issues[31]["labels"] and "factory:rework" not in fake.issues[31]["labels"]
+    assert (inbox / f"{REPO.replace('/', '__')}__31__rework.json").exists()
+
+
+@needs_db
+def test_rework_needs_an_authorized_person_and_a_finished_change(env):
+    fake, intake, _ = env
+    fake.add_issue(32, "t", labelled_by="maintainer")
+    (t,) = intake.poll()
+    intake.report(t, "run-32", "running")
+    fake.user_comments[32] = [{"user": {"login": "maintainer"}, "body": "bug: x", "created_at": "1"}]
+    fake.label(32, "factory:rework", "maintainer")
+    assert intake.reworks() == []                                         # still running: nothing to send back
+    intake.report(t, "run-32", "awaiting_approval", "ok")
+    fake.user_comments[32].append({"user": {"login": "outsider"}, "body": "bug: y", "created_at": "2"})
+    fake.label(32, "factory:rework", "outsider")
+    assert intake.reworks() == []
+    assert any(n == 32 and "lacks write access" in b for n, b in fake.comments)
+
+
+@needs_db
+def test_halt_comment_says_what_to_do_next(env):
+    fake, intake, _ = env
+    fake.add_issue(33, "t", labelled_by="maintainer")
+    (t,) = intake.poll()
+    intake.report(t, "run-33", "halted", "repair limit reached (3 cycles)")
+    (body,) = [b for n, b in fake.comments if n == 33 and "halted" in b]
+    assert "Acceptance criteria section" in body and "split it" in body and "told why this one stopped" in body

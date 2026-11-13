@@ -221,14 +221,59 @@ def run_or_park(deps: Deps, saver, run_id: str, first_input, intake=None) -> str
     return st
 
 
+WAITING = ("awaiting_criteria", "awaiting_arch_approval", "awaiting_approval")
+
+
+def previous_run(dsn: str, saver, deps: Deps, ticket: TicketSpec):
+    """The most recent earlier run on this ticket, as a History, or None. Its halt reason and repair attempts
+    let a retry start informed; its diff lets a rework start from what the person saw."""
+    from factory.config import redact
+    from factory.state import History
+    try:
+        with psycopg.connect(dsn) as c:
+            row = c.execute("SELECT run_id, status, coalesce(detail, '') FROM runs WHERE ticket_id = %s "
+                            "AND run_id NOT LIKE 'qual-%%' ORDER BY started_at DESC LIMIT 1",
+                            (ticket.ticket_id,)).fetchone()
+    except psycopg.Error:
+        return None
+    if row is None:
+        return None
+    prev, status, detail = row
+    values = compile_app(deps, saver).get_state(config_for(prev)).values or {}
+    patch = values.get("patch")
+    keep = ("attempt", "failure_class", "diff_stat")
+    return History(previous_run=prev, status=status,
+                   reason=redact(detail)[:1000] if status in ("halted", "rejected") else "",
+                   attempts=[{k: a.get(k) for k in keep} for a in (values.get("attempts") or [])][-3:],
+                   previous_diff=redact(patch.unified_diff)[:12_000] if (patch and ticket.rework) else "")
+
+
 def start_ticket(deps: Deps, saver, ticket: TicketSpec, intake=None) -> tuple[str, str]:
+    history = previous_run(deps.dsn, saver, deps, ticket)
     run_id = new_run_id(ticket.ticket_id)
+    if history is not None and history.status in WAITING:      # a rework replaces a change nobody pushed
+        record_run(deps.dsn, history.previous_run, status="superseded", detail=f"replaced by {run_id}")
     record_run(deps.dsn, run_id, **ticket_fields(ticket), status="running", stage="ingest")
     if intake:
         intake.report(ticket, run_id, "running")
     status = run_or_park(deps, saver, run_id, {"run_id": run_id, "ticket": ticket, "repair_attempts": 0,
-                                               "model_pins": {}, "attempts": []}, intake)
+                                               "model_pins": {}, "attempts": [], "history": history}, intake)
     return run_id, status
+
+
+def rework_ticket(deps: Deps, saver, run_id: str, reason: str) -> pathlib.Path:
+    """`make rework`: send a run's change back with a reason. Queues a new run of the same ticket."""
+    from factory.config import redact
+    snap = compile_app(deps, saver).get_state(config_for(run_id)).values
+    if not snap.get("ticket"):
+        raise SystemExit(f"unknown run {run_id}")
+    if not reason.strip():
+        raise SystemExit("say what is wrong: make rework RUN=<run_id> REASON='bug: ...' (or 'spec: ...')")
+    t = snap["ticket"].model_copy(update={"rework": redact(reason)[:4000]})
+    inbox = deps.workspace_root / "inbox"
+    f = inbox / f"rework__{re.sub(r'[^A-Za-z0-9_-]+', '_', t.ticket_id)}__{int(time.time())}.json"
+    f.write_text(t.model_dump_json())
+    return f
 
 
 def serve(deps: Deps) -> None:
@@ -270,6 +315,7 @@ def serve(deps: Deps) -> None:
                 intake.poll()
                 for run_id in intake.approvals():
                     run_or_park(deps, saver, run_id, None, intake)
+                intake.reworks()
                 for run_id in intake.arch_approvals():
                     approve_arch(deps, saver, run_id)
                     run_or_park(deps, saver, run_id, None, intake)
@@ -380,6 +426,7 @@ def main(argv: list[str] | None = None) -> None:
     p_run = sub.add_parser("run"); p_run.add_argument("ticket_file")
     for name in ("approve", "resume", "diff", "criteria-ok", "arch-ok"):
         sub.add_parser(name).add_argument("run_id")
+    p_rw = sub.add_parser("rework"); p_rw.add_argument("run_id"); p_rw.add_argument("reason")
     a = ap.parse_args(argv)
 
     deps = Deps.from_env()
@@ -419,6 +466,9 @@ def main(argv: list[str] | None = None) -> None:
             ticket = TicketSpec(**json.loads(pathlib.Path(a.ticket_file).read_text()))
             run_id, st = start_ticket(deps, saver, ticket, intake)
             print(json.dumps({"run_id": run_id, "status": st}))
+        elif a.cmd == "rework":
+            f = rework_ticket(deps, saver, a.run_id, a.reason)
+            print(json.dumps({"run_id": a.run_id, "queued": f.name}))
         elif a.cmd == "arch-ok":
             approve_arch(deps, saver, a.run_id)
             print(json.dumps({"run_id": a.run_id, "status": run_or_park(deps, saver, a.run_id, None, intake)}))

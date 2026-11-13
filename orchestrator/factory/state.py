@@ -24,6 +24,16 @@ class TicketSpec(BaseModel):
     issue_number: int | None = None     # set when the ticket came from GitHub intake (spec §5.6)
     criteria: list[str] = Field(default_factory=list)       # written by a person in the issue (criteria.py)
     manual_checks: list[str] = Field(default_factory=list)  # `feel:` items: a person checks them on the PR
+    rework: str = Field(default="", max_length=4_000)       # a person's reason for sending a change back
+
+
+class History(BaseModel):
+    """What happened on this ticket's previous run, so a retry or a rework does not start blind."""
+    previous_run: str
+    status: str                                             # halted | pr_open | awaiting_approval | ...
+    reason: str = Field(default="", max_length=1_000)       # why it halted, when it did
+    attempts: list[dict] = Field(default_factory=list)      # its last repair attempts (failure class, diff stat)
+    previous_diff: str = Field(default="", max_length=12_000)   # the change it made, for a rework
 
 
 class Plan(BaseModel):
@@ -123,3 +133,4 @@ class FactoryState(TypedDict, total=False):
     review: Review | None               # latest independent code review
     independence: dict[str, str]        # role -> "independent" | "same model as author"
     attempts: Annotated[list[dict], operator.add]   # one record per repair attempt, fed back to the model
+    history: History | None             # this ticket's previous run (runner.previous_run)
