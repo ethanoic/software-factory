@@ -177,6 +177,7 @@ def test_quota_exhausted_parks_and_resumes_from_checkpoint(db, monkeypatch):
     monkeypatch.setattr(nodes, "freeze_tests", lambda s, d: {"tests_sha256": "h"})
     monkeypatch.setattr(nodes, "red_check", lambda s, d: {"red_check": RedCheck(new_tests=1, new_failed=1)})
     monkeypatch.setattr(nodes, "review_code", lambda s, d: {"review": None})
+    monkeypatch.setattr(nodes, "arch_check", lambda s, d: {"arch_triggers": []})
     monkeypatch.setattr(nodes, "generate", generate)
     monkeypatch.setattr(nodes, "sandbox", lambda s, d: {"sandbox": SandboxResult(
         exit_code=0, passed=1, failed=0, lint_errors=0, failure_class=FailureClass.NONE)})

@@ -25,6 +25,7 @@ class StubDeps:
 TICKET = TicketSpec(ticket_id="T-1", title="t", body="b", repo="o/r", language="python")
 PLAN = Plan(summary="s", target_files=["app.py"], acceptance_criteria=["c"], test_files=[], complexity="routine")
 REVIEWS: list = []          # reviews the stubbed reviewer returns, in order (then: no findings)
+ARCH: list = []             # architecture triggers the stubbed arch_check returns, in order (then: none)
 
 
 def sandbox_result(fc):
@@ -46,6 +47,7 @@ def stub_nodes(monkeypatch):
     monkeypatch.setattr(nodes, "freeze_tests", lambda s, d: {"tests_sha256": "h"})
     monkeypatch.setattr(nodes, "red_check", lambda s, d: {"red_check": RedCheck(new_tests=2, new_failed=2)})
     monkeypatch.setattr(nodes, "review_code", lambda s, d: {"review": reviews.pop(0) if reviews else None})
+    monkeypatch.setattr(nodes, "arch_check", lambda s, d: {"arch_triggers": ARCH.pop(0) if ARCH else []})
     monkeypatch.setattr(nodes, "generate", lambda s, d: {
         "patch": Patch(unified_diff="d", produced_by=Tier.T3_REMOTE, model="m"), "qa": None})
 

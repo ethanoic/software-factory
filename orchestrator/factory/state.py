@@ -103,6 +103,8 @@ class FactoryState(TypedDict, total=False):
     plan: Plan
     criteria_source: Literal["issue", "proposed", "approved"]   # who owns the plan's acceptance criteria
     criteria_approved: bool             # set only by a person (label or make criteria-ok), never by a node
+    arch_triggers: list[str]            # why the final patch changes the architecture (archgate.py)
+    arch_approved: bool                 # set only by a person (factory:arch-approve or make arch-ok)
     tests_sha256: str
     patch: Patch
     sandbox: SandboxResult

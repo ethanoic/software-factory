@@ -2,7 +2,7 @@
 
 A local service on one Mac (one operator, many projects) that turns labelled GitHub issues into draft PRs:
 plan → criteria approved by a person → tests by a separate model → tests must fail first → code → sealed
-sandbox → QA → independent review → repair (≤ 3) → human approval → draft PR.
+sandbox → QA → independent review → repair (≤ 3) → architecture check → human approval → draft PR.
 
 - **Spec (decisions, invariants, maintainer guide §7):** https://claude.ai/artifact/DkiySGK2a4xoLeyak7tewW
 - **Security review:** https://claude.ai/artifact/9smt2RTH3GVVdCnRpEpoU3
@@ -26,6 +26,9 @@ sandbox → QA → independent review → repair (≤ 3) → human approval → 
 9. A person owns the acceptance criteria. Criteria written in the issue (`criteria.py`) are used verbatim;
    criteria the planner proposed stop the run at `criteria_gate` until a person approves them
    (`runner.approve_criteria`). No node sets `criteria_approved`, and `make resume` cannot pass the gate.
+10. Code, not a model, decides when a change alters the architecture (`archgate.py`, run by `arch_check`).
+    Such a change is pushed only with `factory:arch-approve` / `make arch-ok` (`runner.approve_arch`); the
+    ordinary approval is refused, and `compile_pr` halts if it gets there without one.
 
 ## Commands
 
