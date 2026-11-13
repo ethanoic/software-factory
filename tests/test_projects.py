@@ -277,3 +277,21 @@ def test_every_language_can_be_registered_and_the_database_refuses_others(db):
         assert projects.add(db, f"o/lang{i}", lang).language == lang
     with psycopg.connect(db, autocommit=True) as c, pytest.raises(psycopg.errors.CheckViolation):
         c.execute("INSERT INTO projects (repo, language) VALUES ('o/go', 'go')")
+
+
+
+@needs_db
+def test_ingest_reads_the_acceptance_criteria_a_person_wrote(db, tmp_path, monkeypatch):
+    """Gate 1: criteria come from the issue body, through the same sanitising as the rest of it."""
+    work = _origin(tmp_path, {"package.json": '{"name": "x"}', "index.js": "module.exports = 1\n"})
+    h = depshash.deps_hash(work, "node")
+    projects.add(db, "o/r", "node")
+    projects.set_image(db, "o/r", projects.image_name("o/r", h), h)
+    body = ("Add shout.\n\n## Acceptance criteria\n- <b>shout</b>(\"ada\") returns \"ADA\"\n"
+            "- token=abc123 is never logged\n- feel: it reads like a shout\n")
+    t = TicketSpec(ticket_id="o/r#2", title="t", body=body, repo="o/r", language="node", issue_number=2)
+    out = _ingest(tmp_path, db, t, monkeypatch)
+    assert "halt_reason" not in out, out
+    assert out["ticket"].criteria[0] == 'shout("ada") returns "ADA"'          # tags stripped
+    assert "abc123" not in out["ticket"].criteria[1]                           # secrets redacted
+    assert out["ticket"].manual_checks == ["it reads like a shout"]

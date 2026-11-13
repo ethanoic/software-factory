@@ -11,6 +11,16 @@ def route_after_triage(s: FactoryState) -> str:
     return "plan" if s.get("accepted") else "halt"
 
 
+def route_after_plan(s: FactoryState) -> str:
+    """Criteria a person wrote go straight to the test writer; criteria the planner proposed wait for a
+    person at criteria_gate. Qualification runs measure models and have no person to ask."""
+    if s.get("halt_reason"):
+        return "halt"
+    if s.get("qualification") or s.get("criteria_source") == "issue":
+        return "write_tests"
+    return "criteria_gate"
+
+
 def route_after_generate(s: FactoryState) -> str:
     if s.get("halt_reason"):
         return "halt"
@@ -78,18 +88,20 @@ def build(deps):
     from factory.breaker import guarded
 
     g = StateGraph(FactoryState)
-    for name in ("ingest", "triage", "plan", "write_tests", "freeze_tests", "red_check", "generate", "sandbox", "qa",
-                 "review_code", "repair", "compile_pr"):
+    for name in ("ingest", "triage", "plan", "criteria_gate", "write_tests", "freeze_tests", "red_check", "generate",
+                 "sandbox", "qa", "review_code", "repair", "compile_pr"):
         g.add_node(name, guarded(getattr(nodes, name), deps, node_name=name))
     g.add_node("halt", nodes.halt)                       # never guarded: must always run
 
     g.add_edge(START, "ingest")
-    for src, dst in (("ingest", "triage"), ("plan", "write_tests"), ("write_tests", "freeze_tests"),
+    for src, dst in (("ingest", "triage"), ("criteria_gate", "write_tests"), ("write_tests", "freeze_tests"),
                      ("freeze_tests", "red_check")):
         g.add_conditional_edges(src, next_or_halt(dst), {dst: dst, "halt": "halt"})
     g.add_conditional_edges("red_check", route_after_red_check,
                             {"generate": "generate", "write_tests": "write_tests", "halt": "halt"})
     g.add_conditional_edges("triage", route_after_triage, {"plan": "plan", "halt": "halt"})
+    g.add_conditional_edges("plan", route_after_plan,
+                            {"write_tests": "write_tests", "criteria_gate": "criteria_gate", "halt": "halt"})
     g.add_conditional_edges("generate", route_after_generate,
                             {"sandbox": "sandbox", "repair": "repair", "halt": "halt"})
     g.add_conditional_edges("sandbox", route_after_sandbox, {"qa": "qa", "repair": "repair", "halt": "halt"})
@@ -102,8 +114,11 @@ def build(deps):
     return g
 
 
+HUMAN_GATES = ["criteria_gate", "compile_pr"]   # Gate 1 (criteria) and Gate 4a (push). Only a person resumes.
+
+
 def compile_app(deps, saver, *, human_gate: bool = True):
-    return build(deps).compile(checkpointer=saver, interrupt_before=["compile_pr"] if human_gate else None)
+    return build(deps).compile(checkpointer=saver, interrupt_before=HUMAN_GATES if human_gate else None)
 
 
 def config_for(run_id: str) -> dict:

@@ -5,7 +5,8 @@
 
 const POLL_MS = 5000;
 const DOING = {
-  ingest: "Cloning the repo", triage: "Triaging", plan: "Planning", write_tests: "Writing the tests",
+  ingest: "Cloning the repo", triage: "Triaging", plan: "Planning", criteria_gate: "Waiting for your criteria",
+  write_tests: "Writing the tests",
   freeze_tests: "Freezing the tests", red_check: "Checking the tests fail first",
   generate: "Writing code", sandbox: "Running the tests", qa: "Security scan",
   review_code: "Independent review", repair: "Repairing",
@@ -196,6 +197,7 @@ function tagState(card) {
     case "parked": return { tone: "paused",
       text: `Paused: Claude plan limit. ${card.resume_at ? `Retries around ${clock(card.resume_at)}` : "Retries hourly"}` };
     case "halted": return { tone: "stopped", text: "Stopped. See Your move" };
+    case "awaiting_criteria": return { tone: "yours", text: "Waiting for you to approve the criteria" };
     case "awaiting_approval": return { tone: "yours", text: "Waiting for your approval" };
     case "pr_open": return { tone: "yours", text: "PR waiting for your review" };
     default: return { tone: "moving", text: card.status };

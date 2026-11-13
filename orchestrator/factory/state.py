@@ -22,6 +22,8 @@ class TicketSpec(BaseModel):
     base_branch: str = "main"
     language: Literal["python", "node", "javascript", "typescript", "rust", "java", "godot"]   # see depshash.FAMILY
     issue_number: int | None = None     # set when the ticket came from GitHub intake (spec §5.6)
+    criteria: list[str] = Field(default_factory=list)       # written by a person in the issue (criteria.py)
+    manual_checks: list[str] = Field(default_factory=list)  # `feel:` items: a person checks them on the PR
 
 
 class Plan(BaseModel):
@@ -99,6 +101,8 @@ class FactoryState(TypedDict, total=False):
     accepted: bool
     triage_reason: str
     plan: Plan
+    criteria_source: Literal["issue", "proposed", "approved"]   # who owns the plan's acceptance criteria
+    criteria_approved: bool             # set only by a person (label or make criteria-ok), never by a node
     tests_sha256: str
     patch: Patch
     sandbox: SandboxResult

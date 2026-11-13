@@ -21,7 +21,10 @@ body:
     id: criteria
     attributes:
       label: Acceptance criteria
-      description: Concrete input → output examples. The factory turns these into tests before writing code.
+      description: >-
+        One bullet per concrete input → output example. The factory turns each into a test before writing
+        code, exactly as written. Start a bullet with "feel:" for anything only a person can judge; it is
+        listed on the PR as a check by hand instead.
       placeholder: |
         - greet("  Ada ") returns "Hello, Ada!"
         - greet("   ") returns "Hello, World!"

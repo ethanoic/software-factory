@@ -25,9 +25,9 @@ from factory.state import TicketSpec
 
 API = "https://api.github.com"
 TRUSTED_ROLES = {"admin", "maintain", "write"}
-ACTIVE = ("queued", "running", "awaiting_approval", "parked")
+ACTIVE = ("queued", "running", "awaiting_criteria", "awaiting_approval", "parked")
 STATUS_LABELS = {
-    "queued": "factory:queued", "running": "factory:running",
+    "queued": "factory:queued", "running": "factory:running", "awaiting_criteria": "factory:awaiting-criteria",
     "awaiting_approval": "factory:awaiting-approval", "pr_open": "factory:pr-open",
     "halted": "factory:halted", "rejected": "factory:rejected", "parked": "factory:parked",
 }
@@ -39,10 +39,12 @@ GREEN, PURPLE, YELLOW, RED, GREY = "1f883d", "8250df", "fbca04", "d73a4a", "d0d7
 def label_specs(cfg: dict) -> dict[str, tuple[str, str]]:
     """name -> (colour, description). GitHub shows the description under each label in the label picker,
     so this is where whoever triages issues learns what to add. Descriptions are capped at 100 chars."""
-    ready, approve = cfg["trigger_label"], cfg["approve_label"]
+    ready, approve, crit = cfg["trigger_label"], cfg["approve_label"], cfg["criteria_label"]
     by_factory = "Set by the factory, don't change by hand:"
     specs = {
         ready: (GREEN, "Add this to have the AI factory work on the issue. Needs write access."),
+        crit: (PURPLE, "Add this to approve the acceptance criteria, as they stand in the issue. Needs write access."),
+        STATUS_LABELS["awaiting_criteria"]: (YELLOW, f"Check the proposed acceptance criteria, then add {crit}."),
         approve: (PURPLE, "Add this to open the draft PR after the factory's tests pass. Needs write access."),
         STATUS_LABELS["queued"]: (GREY, f"{by_factory} waiting for a free slot."),
         STATUS_LABELS["running"]: (GREY, f"{by_factory} working on it now."),
@@ -72,6 +74,7 @@ def validate(cfg: dict) -> dict:
     cfg.setdefault("poll_interval_s", 120)
     cfg.setdefault("trigger_label", "factory:ready")
     cfg.setdefault("approve_label", "factory:approve")
+    cfg.setdefault("criteria_label", "factory:criteria-ok")
     cfg.setdefault("labelers", [])
     cfg.setdefault("comment_on_status", True)
     if int(cfg["poll_interval_s"]) < 60:
@@ -286,6 +289,33 @@ class Intake:
                 print(f"[github] approval check {repo}#{n} failed: {e}", flush=True)
         return out
 
+    def criteria_approvals(self) -> list[tuple[str, "criteria.Criteria"]]:
+        """(run id, criteria) for runs waiting at Gate 1 whose issue got the criteria label from an authorized
+        user. The criteria are read from the issue as it stands now: if the person added or edited an
+        Acceptance criteria section, that wins over the planner's proposal."""
+        from factory import criteria
+        label = self.cfg["criteria_label"]
+        with psycopg.connect(self.dsn) as c:
+            rows = c.execute("SELECT repo, number, run_id FROM github_issues WHERE status='awaiting_criteria'").fetchall()
+        out = []
+        for repo, n, run_id in rows:
+            try:
+                if label not in self.gh.labels_of(repo, n):
+                    continue
+                who = self.gh.labeler(repo, n, label)
+                self.gh.remove_label(repo, n, label)
+                if not self.authorized(repo, who):
+                    self.gh.comment(repo, n, f"`{label}` was applied by @{who or 'unknown'}, who lacks write access; ignored.")
+                    continue
+                issue, _ = self.gh.get(f"/repos/{repo}/issues/{n}")
+                found = criteria.parse(issue.get("body") or "")
+                found = criteria.Criteria(testable=[redact(x) for x in found.testable],
+                                          manual=[redact(x) for x in found.manual])
+                out.append((run_id, found))
+            except httpx.HTTPError as e:
+                print(f"[github] criteria check {repo}#{n} failed: {e}", flush=True)
+        return out
+
     # ---------------------------------------------------------- reporting
     def _set_label(self, repo: str, n: int, status: str) -> None:
         for s, name in STATUS_LABELS.items():
@@ -306,6 +336,13 @@ class Intake:
             if self.cfg["comment_on_status"]:
                 msg = {
                     "running": f"Factory run `{run_id}` started.",
+                    "awaiting_criteria": (
+                        "No acceptance criteria were found in this issue, so the planner proposed these. Nothing "
+                        "is tested until a person approves them.\n\n```markdown\n" + detail + "\n```\n\n"
+                        "If they are right, add `" + self.cfg["criteria_label"] + "`. If not, paste the section "
+                        "into the issue description, edit it (one bullet per criterion; start a bullet with "
+                        "`feel:` for anything only a person can judge), then add `" + self.cfg["criteria_label"]
+                        + "`. The section in the issue wins."),
                     "awaiting_approval": f"Tests and QA passed.\n\n{detail}\n\nRead the change first: on the factory "
                                          f"computer, run `make diff RUN={run_id}`. Then add "
                                          f"`{self.cfg['approve_label']}` to open the draft PR.",
