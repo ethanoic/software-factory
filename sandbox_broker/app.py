@@ -31,9 +31,12 @@ from requests.exceptions import ReadTimeout
 
 from archive import MAX_ARCHIVE, Rejected, changed_files_archive, read_results, rebuild_archive
 
+_NODE = os.environ.get("RUNNER_IMAGE_TS", "factory-runner-ts:locked")      # one Node runner for JS and TS
 IMAGES = {"python": os.environ.get("RUNNER_IMAGE_PY", "factory-runner-py:locked"),
-          "javascript": os.environ.get("RUNNER_IMAGE_TS", "factory-runner-ts:locked"),   # same Node runner
-          "typescript": os.environ.get("RUNNER_IMAGE_TS", "factory-runner-ts:locked")}
+          "node": _NODE, "javascript": _NODE, "typescript": _NODE,
+          "rust": os.environ.get("RUNNER_IMAGE_RS", "factory-runner-rs:locked"),
+          "java": os.environ.get("RUNNER_IMAGE_JAVA", "factory-runner-java:locked"),
+          "godot": os.environ.get("RUNNER_IMAGE_GODOT", "factory-runner-godot:locked")}
 RUN_ID = re.compile(r"^[a-z0-9-]{8,64}$")
 # Per-project runner images built by `make project-rebuild`. Only this shape is accepted, so the factory
 # cannot ask for any other image on the machine.

@@ -77,6 +77,66 @@ def js_signatures(source: str) -> str:
     return "\n".join(out) or "(no functions, classes or exports found)"
 
 
+def _line_signatures(source: str, patterns: list[re.Pattern], skip: re.Pattern, comment: tuple[str, ...]) -> str:
+    """Declarations only, one per line, bodies cut at the first `{` or `:`. Shared by the Rust, Java and
+    GDScript readers, which, like the JavaScript one, read line by line rather than parse."""
+    out = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(comment) or skip.match(line):
+            continue
+        for pat in patterns:
+            m = pat.match(line)
+            if m:
+                sig = m.group(0).rstrip().rstrip("{").rstrip()
+                out.append(sig[:240])
+                break
+    return "\n".join(out) or "(no public declarations found)"
+
+
+RUST_PATTERNS = [
+    re.compile(r"^\s*pub(\([^)]*\))?\s+(const\s+|async\s+|unsafe\s+|extern\s+\"[^\"]*\"\s+)*fn\s+\w+[^{;]*"),
+    re.compile(r"^\s*pub(\([^)]*\))?\s+(struct|enum|trait|type|mod|const|static|use)\s+[^{;]*;?"),
+    re.compile(r"^\s*impl(<[^>]*>)?\s+[^{]*"),
+    re.compile(r"^\s*#\[derive\([^)]*\)\]"),
+]
+RUST_SKIP = re.compile(r"^\s*(let|if|for|while|match|return|loop)\b")
+
+JAVA_PATTERNS = [
+    re.compile(r"^\s*package\s+[\w.]+;"),
+    re.compile(r"^\s*(public|protected)\s+([\w<>\[\],?\s]+\s+)?(class|interface|enum|record|@interface)\s+\w+[^{]*"),
+    re.compile(r"^\s*(public|protected)\s+(static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|<[^>]+>\s+)*"
+               r"[\w<>\[\],.?\s]+\s+\w+\s*\([^)]*\)[^{;]*"),
+    re.compile(r"^\s*(public|protected)\s+\w+\s*\([^)]*\)[^{;]*"),                       # constructors
+    re.compile(r"^\s*(public|protected)\s+static\s+final\s+[^=;]+"),                    # constants, no values
+]
+JAVA_SKIP = re.compile(r"^\s*(if|for|while|switch|catch|return|else|new|throw)\b")
+
+GD_PATTERNS = [
+    re.compile(r"^(class_name|extends)\s+\S+.*"),
+    re.compile(r"^(static\s+)?func\s+[A-Za-z]\w*\s*\([^)]*\)(\s*->\s*[\w.\[\]]+)?"),   # public: no leading _
+    re.compile(r"^signal\s+\w+.*"),
+    re.compile(r"^(@export[\w(),\s\"]*\s+)?(const|var|enum)\s+[A-Za-z]\w*[^=:]*(:\s*[\w.\[\]]+)?"),
+    re.compile(r"^class\s+\w+.*"),
+]
+GD_SKIP = re.compile(r"^\s")                    # indented lines are bodies; top-level only
+
+
+def rust_signatures(source: str) -> str:
+    return _line_signatures(source, RUST_PATTERNS, RUST_SKIP, ("//", "/*", "*"))
+
+
+def java_signatures(source: str) -> str:
+    return _line_signatures(source, JAVA_PATTERNS, JAVA_SKIP, ("//", "/*", "*"))
+
+
+def gdscript_signatures(source: str) -> str:
+    return _line_signatures(source, GD_PATTERNS, GD_SKIP, ("#",))
+
+
+READERS = {".py": python_signatures, ".rs": rust_signatures, ".java": java_signatures, ".gd": gdscript_signatures}
+
+
 def signatures(repo: pathlib.Path, paths: list[str], language: str) -> dict[str, str]:
     """{path: signatures} for the target files. A file that does not exist yet is marked as new."""
     out, total = {}, 0
@@ -86,7 +146,7 @@ def signatures(repo: pathlib.Path, paths: list[str], language: str) -> dict[str,
             out[p] = "(new file: does not exist yet)"
             continue
         text = f.read_text(errors="replace")
-        sig = python_signatures(text) if p.endswith(".py") else js_signatures(text)
+        sig = READERS.get(pathlib.PurePosixPath(p).suffix, js_signatures)(text)
         total += len(sig)
         out[p] = sig if total <= MAX_CHARS else "(omitted: context budget)"
     return out
@@ -95,12 +155,17 @@ def signatures(repo: pathlib.Path, paths: list[str], language: str) -> dict[str,
 def test_style(repo: pathlib.Path, language: str) -> str:
     """How existing tests import the code (first lines of one existing test), so new tests match.
     Test code only: it shows module style, not the implementation."""
-    tests = repo / "tests"
-    if not tests.is_dir():
-        return "(no existing tests)"
-    pattern = "test_*.py" if language == "python" else "*.test.*"
-    for f in sorted(tests.rglob(pattern)):
-        if f.is_file() and not f.is_symlink():
-            head = "\n".join(f.read_text(errors="replace").splitlines()[:15])
-            return f"{f.relative_to(repo).as_posix()}:\n{head}"
+    from factory.depshash import family
+    fam = family(language)
+    pattern = {"python": "test_*.py", "node": "*.test.*", "rust": "*.rs", "java": "*Test.java",
+               "godot": "test_*.gd"}[fam]
+    # Java projects keep their tests under src/test/java; the factory's new tests still go to tests/.
+    roots = [repo / "tests"] + ([repo / "src" / "test" / "java"] if fam == "java" else [])
+    for tests in roots:
+        if not tests.is_dir() or tests.is_symlink():
+            continue
+        for f in sorted(tests.rglob(pattern)):
+            if f.is_file() and not f.is_symlink():
+                head = "\n".join(f.read_text(errors="replace").splitlines()[:15])
+                return f"{f.relative_to(repo).as_posix()}:\n{head}"
     return "(no existing tests)"

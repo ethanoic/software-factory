@@ -266,3 +266,14 @@ def test_serve_rejects_unregistered_tickets_and_holds_unready_ones(db, tmp_path)
     assert _next_ticket(D(), inbox) == inbox / "3-ready.json"
     assert (inbox / "rejected" / "1-stranger.json").exists()
     assert (inbox / "2-unbuilt.json").exists()                  # waits until its image is built
+
+
+@needs_db
+def test_every_language_can_be_registered_and_the_database_refuses_others(db):
+    """Migration 007: the projects table accepts each runner family, and still refuses unknown languages
+    even if a caller skips the Python check."""
+    import psycopg
+    for i, lang in enumerate(depshash.LANGUAGES):
+        assert projects.add(db, f"o/lang{i}", lang).language == lang
+    with psycopg.connect(db, autocommit=True) as c, pytest.raises(psycopg.errors.CheckViolation):
+        c.execute("INSERT INTO projects (repo, language) VALUES ('o/go', 'go')")

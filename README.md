@@ -100,7 +100,7 @@ at the wrong code.
 
 | Command | What it does |
 | --- | --- |
-| `make project-add REPO=owner/name LANGUAGE=javascript [BRANCH=main] [MAX_RUNS=2]` | Registers the repo, then builds its test runner. Languages: `python`, `javascript`, `typescript`. |
+| `make project-add REPO=owner/name LANGUAGE=node [BRANCH=main] [MAX_RUNS=2]` | Registers the repo, then builds its test runner. Languages: `python`, `node` (JavaScript or TypeScript; `javascript` and `typescript` still work), `rust`, `java`, `godot`. |
 | `make project-list` | Every project: active or paused, language, branch, daily cap, runner image |
 | `make project-rebuild REPO=owner/name` | Rebuilds the runner from the repo's current dependency files |
 | `make project-rebuild-all` | Rebuilds every project's runner; do this after updating the factory |
@@ -111,9 +111,23 @@ at the wrong code.
 
 **Each project has its own test runner.** `project-add` and `project-rebuild` ask the factory to clone
 the repo (inside its container, with git hooks off). The factory hands back only the dependency files
-(`package.json` and `package-lock.json`, or `requirements*.txt`). An image named
-`factory-runner-<project>:<hash of those files>` is built from them, so two Node projects never share
-packages.
+(see the table below). An image named `factory-runner-<project>:<hash of those files>` is built from
+them, so two projects never share packages, and nothing is downloaded while tests run.
+
+| Language | Dependency files baked into the image | Tests (frozen, in `tests/`) | Lint on changed files | Security scan |
+| --- | --- | --- | --- | --- |
+| `python` | `requirements*.txt` | pytest, `tests/test_*.py` | ruff | bandit |
+| `node` | `package.json`, `package-lock.json` | Jest, `tests/*.test.js` (repo's own Jest) | repo's ESLint config, if any | eslint-plugin-security |
+| `rust` | `Cargo.toml`, `Cargo.lock` (crates vendored and compiled once) | cargo-nextest, `tests/*.rs` | clippy (deny-level only) | none |
+| `java` | `pom.xml` (resolved offline into the image) | Maven Surefire, `tests/*Test.java`, compiled alongside `src/test/java` | none (compile errors only) | none |
+| `godot` | `.godot-version` (Godot release, 4.3 or later; default 4.4.1) | GUT, `tests/test_*.gd`; GUT must be committed at `addons/gut/` | gdlint | none |
+
+Limits of the new runners: one Rust crate at the repo root (no Cargo workspaces yet), Maven only (no
+Gradle yet), and no security scanner for Rust, Java or GDScript. For those three the independent
+reviewer is the only check for unsafe code, so keep `review.mode: block`. A GUT test that never
+reaches an assertion (in GDScript, calling a function that does not exist is a run-time error, not a
+compile error) counts as failed, and any `SCRIPT ERROR` fails the run. The `examples/hello-rust`,
+`examples/hello-java` and `examples/hello-godot` folders are small projects to try each runner on.
 
 **Dependency changes are caught before any model call.** Every run starts by hashing the repo's
 dependency files. If they differ from what the runner was built with, the run stops with
@@ -443,7 +457,7 @@ These need the running stack and are checked by hand in Phase 1:
 
 ## What has been tested, and what has not
 
-Tested in this build (`make test`, 155 tests with `FACTORY_TEST_DSN` set and Docker running; 38 need
+Tested in this build (`make test`, 222 tests with `FACTORY_TEST_DSN` set and Docker running; 39 need
 Postgres and 1 needs Docker):
 routing for all three `local_mode`s, diff validation and forbidden paths, every FSM router, the real
 LangGraph wiring with stubbed nodes (repair loop, 3-repair cap, human gate, tamper halt), the breaker
@@ -482,6 +496,18 @@ a recorder: it fetched only the dependency files, built from the right context a
 The database's first-start script was run against Postgres 16: the board role reads tables created by
 later migrations and cannot write. The board was checked in Chromium with three projects, at desktop and
 phone widths, light and dark: no script errors, no sideways scrolling, and the project filter works.
+
+The Rust, Java and Godot runners (13 Nov 2026) were run through the real entrypoint, outside Docker,
+with the factory's own result readers judging each run. Rust (cargo-nextest 0.9, clippy) and Godot
+(4.4.1 headless, GUT 9.4, gdlint) on the `examples/` projects: a new test calling missing code fails the
+tests-fail-first check, wrong code is an assertion failure, right code passes, a syntax error and a lint
+error are repairable, a panic fails the test, and missing tooling (no GUT, no nextest, a crate that is not
+vendored) halts instead of starting a paid repair. A crate with a real dependency was vendored and
+pre-compiled the way the Dockerfile does, then tested with the network blocked: nothing was downloaded
+or recompiled. The Python and Node paths gave the same results as before, including through an image
+that does not declare its runner. Not run: the three new Dockerfiles (Docker Hub was not reachable),
+and Java end to end (Maven Central was not reachable): its report reading and compile-error handling are
+tested on Surefire's format, and its offline failure on real Maven output.
 
 The sealed runner was run against a real Docker Engine 29 daemon on Linux: the factory's own sandbox
 step called the live broker, which loaded a test runner through per-run volumes. Inside, the runner had

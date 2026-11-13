@@ -98,7 +98,7 @@ HALT_RULES = [
      [step("Build it, then retry.", command="make project-rebuild REPO=<owner/name>")]),
     (r"not a registered project", "The ticket names a repo the factory does not work on.",
      [step("If you want the factory to work on it, add it as a project:",
-           command="make project-add REPO=<owner/name> LANGUAGE=<python|javascript|typescript>")]),
+           command="make project-add REPO=<owner/name> LANGUAGE=<python|node|rust|java|godot>")]),
     (r"project .* is paused", "The project is paused, so its tickets do not run.",
      [step("Resume it, then retry:", command="make project-resume REPO=<owner/name>")]),
     (r"broker refused the run", "The sandbox refused the source: something other than plain files, or too large.",
@@ -209,7 +209,7 @@ def project_actions(projects: list[dict], online: bool) -> list[dict]:
         return [{"tone": "yours", "rank": 1, "title": "Add your first project",
                  "why": "The factory works only on repos you add as projects, and none are added yet.",
                  "steps": [step("Add the repo; this also builds its test runner:",
-                                command="make project-add REPO=<owner/name> LANGUAGE=<python|javascript|typescript>")]}]
+                                command="make project-add REPO=<owner/name> LANGUAGE=<python|node|rust|java|godot>")]}]
     return [{"tone": "stopped", "rank": 1, "title": f"Build the runner for {p['repo']}", "project": p["repo"],
              "why": "This project has no test runner yet, so its tickets wait in the queue.",
              "steps": [step("Build it:", command=f"make project-rebuild REPO={p['repo']}")]}

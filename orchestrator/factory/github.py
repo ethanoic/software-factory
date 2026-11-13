@@ -20,6 +20,7 @@ import psycopg
 import yaml
 
 from factory.config import is_factory_repo, redact
+from factory.depshash import LANGUAGES
 from factory.state import TicketSpec
 
 API = "https://api.github.com"
@@ -85,8 +86,8 @@ def validate(cfg: dict) -> dict:
             raise SystemExit(f"github.yaml: {r['repo']} is the factory's own repo; the factory never works on "
                              "itself. Remove it from `repos` (change the factory by pull request instead).")
         r.setdefault("base_branch", "main")
-        if r.setdefault("language", "python") not in ("python", "javascript", "typescript"):
-            raise SystemExit(f"github.yaml: {r['repo']} language must be python, javascript or typescript")
+        if r.setdefault("language", "python") not in LANGUAGES:
+            raise SystemExit(f"github.yaml: {r['repo']} language must be one of {', '.join(LANGUAGES)}")
     return cfg
 
 

@@ -9,14 +9,14 @@ DEPS ?=
 OMLX_MODELS ?= $(HOME)/models/mlx
 PY ?= python3
 
-.PHONY: help init lock db hoststat runner-py runner-ts up down logs test test-sandbox sandbox-check runs-clean check status approve diff pool claude-token claude-token-paste claude-token-check board db-board backup restore project-add project-list project-rebuild project-rebuild-all project-pause project-resume project-limit project-labelers project-remove
+.PHONY: help init lock db hoststat runner-py runner-ts runner-rs runner-java runner-godot up down logs test test-sandbox sandbox-check runs-clean check status approve diff pool claude-token claude-token-paste claude-token-check board db-board backup restore project-add project-list project-rebuild project-rebuild-all project-pause project-resume project-limit project-labelers project-remove
 
 help:
 	@echo "init      create folders, secrets placeholder, .env.factory (with generated database passwords)"
 	@echo "lock      generate hashed lockfiles (needs uv)"
 	@echo ""
 	@echo "Projects (the repos the factory works on):"
-	@echo "project-add REPO=owner/name LANGUAGE=python|javascript|typescript [BRANCH=main] [MAX_RUNS=n]"
+	@echo "project-add REPO=owner/name LANGUAGE=python|node|rust|java|godot [BRANCH=main] [MAX_RUNS=n]"
 	@echo "project-list                    every project, its state and runner image"
 	@echo "project-rebuild REPO=...        rebuild a project's runner image (after its dependencies change)"
 	@echo "project-rebuild-all             rebuild every project's image (after updating the factory)"
@@ -30,6 +30,9 @@ help:
 	@echo "hoststat  install the macOS memory sensor (launchd)"
 	@echo "runner-py DEPS=<repo>  build the Python runner image with that repo's deps"
 	@echo "runner-ts DEPS=<repo>  build the Node (JavaScript or TypeScript) runner image with that repo's deps"
+	@echo "runner-rs DEPS=<repo>  build the Rust runner image (vendors and compiles Cargo.lock's crates)"
+	@echo "runner-java DEPS=<repo>    build the Java runner image (resolves pom.xml offline; Maven only)"
+	@echo "runner-godot DEPS=<repo>   build the Godot runner image (.godot-version picks the release; needs GUT in the repo)"
 	@echo "up / down / logs       start, stop, follow the factory"
 	@echo "test      run the factory's own unit tests (no services needed)"
 	@echo "test-sandbox           prove the runner is sealed: real container, no network, no .git, safe results"
@@ -77,6 +80,28 @@ runner-ts:
 	cp runner-images/typescript/eslint.security.mjs build/runner-ts/typescript/
 	-cp $(DEPS)/package.json $(DEPS)/package-lock.json build/runner-ts/deps/ 2>/dev/null
 	docker build -t factory-runner-ts:locked build/runner-ts
+
+runner-rs:
+	@test -n "$(DEPS)" || (echo "usage: make runner-rs DEPS=/path/to/target-repo" && exit 1)
+	rm -rf build/runner-rs && mkdir -p build/runner-rs/deps build/runner-rs/rust
+	cp runner-images/entrypoint.sh runner-images/rust/Dockerfile build/runner-rs/
+	cp runner-images/rust/nextest.toml build/runner-rs/rust/
+	-cp $(DEPS)/Cargo.toml $(DEPS)/Cargo.lock build/runner-rs/deps/ 2>/dev/null
+	docker build -t factory-runner-rs:locked build/runner-rs
+
+runner-java:
+	@test -n "$(DEPS)" || (echo "usage: make runner-java DEPS=/path/to/target-repo" && exit 1)
+	rm -rf build/runner-java && mkdir -p build/runner-java/deps
+	cp runner-images/entrypoint.sh runner-images/java/Dockerfile build/runner-java/
+	-cp $(DEPS)/pom.xml build/runner-java/deps/ 2>/dev/null
+	docker build -t factory-runner-java:locked build/runner-java
+
+runner-godot:
+	@test -n "$(DEPS)" || (echo "usage: make runner-godot DEPS=/path/to/target-repo" && exit 1)
+	rm -rf build/runner-godot && mkdir -p build/runner-godot/deps
+	cp runner-images/entrypoint.sh runner-images/godot/Dockerfile build/runner-godot/
+	-cp $(DEPS)/.godot-version build/runner-godot/deps/ 2>/dev/null
+	docker build -t factory-runner-godot:locked build/runner-godot
 
 SERVICES = postgres orchestrator pool-worker sandbox-broker docker-proxy egress-proxy board
 

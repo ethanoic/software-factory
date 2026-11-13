@@ -1,0 +1,6 @@
+; Engine configuration file. Minimal project for trying the AI Software Factory.
+config_version=5
+
+[application]
+config/name="factory-hello-godot"
+config/features=PackedStringArray("4.4")
