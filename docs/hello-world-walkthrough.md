@@ -128,7 +128,10 @@ says so and gives the command.
 ## 7. Create the issues
 
 The repository has an issue form: **Issues → New issue → Factory task**. It asks for the change and concrete
-acceptance criteria, which the factory turns into tests before it writes code. Creating an issue does
+acceptance criteria, which the factory turns into tests before it writes code. Issues A and B below have an
+`Acceptance criteria` section, so the factory uses those bullets exactly as written. An issue without one
+stops after planning with `factory:awaiting-criteria` until you approve the criteria the planner proposes
+(add `factory:criteria-ok`; README, "Acceptance criteria"). Creating an issue does
 **not** start a run; adding the `factory:ready` label does.
 
 Create these three. Run the commands from `~/factory-hello-node`, or paste the text into the web form.
@@ -217,7 +220,9 @@ instead of issue labels. Read the change with `make diff RUN=<run_id>`, then app
 ## Writing tickets the factory can finish
 
 - **Small:** 3 files or fewer. Larger changes are marked complex and cost more.
-- **Concrete:** list input → output examples. Vague tickets end at the repair limit.
+- **Concrete:** list input → output examples under an `Acceptance criteria` heading, one bullet each.
+  Without that section, the run waits for you to approve the planner's proposal. Start a bullet with
+  `feel:` for anything only a person can judge.
 - **Code only:** the factory never edits `package.json`, lockfiles, `tests/` or `.github/`. Add dependencies
   yourself, then rebuild the runner image (step 3).
 - **Avoid trigger words:** tickets mentioning secrets, passwords, credentials, API keys, migrations,

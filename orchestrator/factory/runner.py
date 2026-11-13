@@ -103,8 +103,11 @@ def daily_limit() -> int | None:
 
 
 def outcome(app, cfg) -> tuple[str, str]:
-    """(status, detail) of a run after invoke returns: awaiting_approval | pr_open | rejected | halted."""
+    """(status, detail) of a run after invoke returns:
+    awaiting_criteria | awaiting_approval | pr_open | rejected | halted."""
     snap = app.get_state(cfg)
+    if snap.next and "criteria_gate" in snap.next:
+        return "awaiting_criteria", ""
     if snap.next and "compile_pr" in snap.next:
         return "awaiting_approval", ""
     v = snap.values
@@ -115,13 +118,43 @@ def outcome(app, cfg) -> tuple[str, str]:
     return "halted", v.get("halt_reason") or "halted"
 
 
+CRITERIA_SOURCE = {"issue": "written in the issue", "approved": "proposed by the planner, approved by a person",
+                   "proposed": "proposed by the planner, NOT approved"}
+
+
 def approval_note(snap: dict) -> str:
     """What the checks found, for the approval comment, the board and `make diff`."""
     from factory.review import summary
     rc = snap.get("red_check")
     ind = (snap.get("independence") or {}).get("write_tests", "independence unknown")
-    return (f"Tests: {rc.detail if rc else 'not checked'} before the change (written by "
-            f"{(snap.get('model_pins') or {}).get('write_tests', '?')}, {ind}).\n{summary(snap.get('review'))}")
+    manual = list(getattr(snap.get("ticket"), "manual_checks", None) or [])
+    return (f"Acceptance criteria: {CRITERIA_SOURCE.get(snap.get('criteria_source') or '', 'unknown')}.\n"
+            f"Tests: {rc.detail if rc else 'not checked'} before the change (written by "
+            f"{(snap.get('model_pins') or {}).get('write_tests', '?')}, {ind}).\n{summary(snap.get('review'))}"
+            + (f"\nCheck by hand (feel:): " + "; ".join(manual) if manual else ""))
+
+
+def criteria_note(snap: dict) -> str:
+    """The proposed criteria, as the section a person can paste into the issue and edit."""
+    from factory import criteria
+    p, t = snap.get("plan"), snap.get("ticket")
+    return criteria.as_markdown(list(p.acceptance_criteria) if p else [],
+                                list(getattr(t, "manual_checks", None) or []))
+
+
+def approve_criteria(deps: Deps, saver, run_id: str, override=None) -> None:
+    """A person approved the criteria of a run waiting at criteria_gate. `override` (criteria.Criteria),
+    when it has testable items, replaces the planner's proposal: that is the person editing them."""
+    app, cfg = compile_app(deps, saver), config_for(run_id)
+    snap = app.get_state(cfg)
+    if not snap.next or "criteria_gate" not in snap.next:
+        raise SystemExit(f"{run_id} is not waiting for criteria approval")
+    update: dict = {"criteria_approved": True}
+    if override is not None and override.testable:
+        update["plan"] = snap.values["plan"].model_copy(update={"acceptance_criteria": list(override.testable)})
+        update["ticket"] = snap.values["ticket"].model_copy(update={"criteria": list(override.testable),
+                                                                    "manual_checks": list(override.manual)})
+    app.update_state(cfg, update)
 
 
 def run_or_park(deps: Deps, saver, run_id: str, first_input, intake=None) -> str:
@@ -140,14 +173,22 @@ def run_or_park(deps: Deps, saver, run_id: str, first_input, intake=None) -> str
     snap = app.get_state(cfg).values
     if st == "awaiting_approval":
         detail = approval_note(snap)
+    elif st == "awaiting_criteria":
+        detail = criteria_note(snap)
     record_run(deps.dsn, run_id, status=st, detail=detail,
                pr_url=detail if st == "pr_open" else None,
-               stage="compile_pr" if st in ("awaiting_approval", "pr_open") else None,
+               stage={"awaiting_approval": "compile_pr", "pr_open": "compile_pr",
+                      "awaiting_criteria": "criteria_gate"}.get(st),
                repair_attempts=snap.get("repair_attempts", 0), models=snap.get("model_pins") or None)
     if st == "awaiting_approval":
         how = "add the approve label on the issue, or " if ticket.issue_number else ""
         alert(run_id, ticket.ticket_id, f"{ticket.ticket_id} passed tests and QA. Read the change: make diff "
                                         f"RUN={run_id}. To open the PR, {how}run: make approve RUN={run_id}")
+    elif st == "awaiting_criteria":
+        how = "add the factory:criteria-ok label on the issue (edit its Acceptance criteria section first if " \
+              "they are wrong), or " if ticket.issue_number else ""
+        alert(run_id, ticket.ticket_id, f"{ticket.ticket_id} needs its acceptance criteria approved before tests "
+                                        f"are written. To approve, {how}run: make criteria-ok RUN={run_id}")
     elif st == "pr_open":
         print(f"[done] {ticket.ticket_id}: {detail}", flush=True)
     if intake:
@@ -203,6 +244,9 @@ def serve(deps: Deps) -> None:
             if intake and intake.due():
                 intake.poll()
                 for run_id in intake.approvals():
+                    run_or_park(deps, saver, run_id, None, intake)
+                for run_id, override in intake.criteria_approvals():
+                    approve_criteria(deps, saver, run_id, override)
                     run_or_park(deps, saver, run_id, None, intake)
             _retry_parked(deps, saver, inbox, intake)
             f = None
@@ -270,7 +314,7 @@ def _retry_parked(deps: Deps, saver, inbox: pathlib.Path, intake=None) -> None:
             shutil.move(f, inbox / "done" / f.name)
 
 
-KEEP_STATUSES = ("running", "parked", "awaiting_approval")   # these still need their clone
+KEEP_STATUSES = ("running", "parked", "awaiting_criteria", "awaiting_approval")   # these still need their clone
 
 
 def clean(dsn: str, runs_root: pathlib.Path, days: int) -> list[str]:
@@ -306,7 +350,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("migrate")
     sub.add_parser("clean").add_argument("--days", type=int, default=14)
     p_run = sub.add_parser("run"); p_run.add_argument("ticket_file")
-    for name in ("approve", "resume", "diff"):
+    for name in ("approve", "resume", "diff", "criteria-ok"):
         sub.add_parser(name).add_argument("run_id")
     a = ap.parse_args(argv)
 
@@ -347,7 +391,14 @@ def main(argv: list[str] | None = None) -> None:
             ticket = TicketSpec(**json.loads(pathlib.Path(a.ticket_file).read_text()))
             run_id, st = start_ticket(deps, saver, ticket, intake)
             print(json.dumps({"run_id": run_id, "status": st}))
+        elif a.cmd == "criteria-ok":
+            approve_criteria(deps, saver, a.run_id)
+            print(json.dumps({"run_id": a.run_id, "status": run_or_park(deps, saver, a.run_id, None, intake)}))
         else:                                         # approve and resume both continue from the checkpoint
+            nxt = compile_app(deps, saver).get_state(config_for(a.run_id)).next or ()
+            if "criteria_gate" in nxt:
+                sys.exit(f"{a.run_id} is waiting for its acceptance criteria to be approved, not for a push. "
+                         f"Read them on the board, then: make criteria-ok RUN={a.run_id}")
             print(json.dumps({"run_id": a.run_id, "status": run_or_park(deps, saver, a.run_id, None, intake)}))
 
 

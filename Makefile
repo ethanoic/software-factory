@@ -9,7 +9,7 @@ DEPS ?=
 OMLX_MODELS ?= $(HOME)/models/mlx
 PY ?= python3
 
-.PHONY: help init lock db hoststat runner-py runner-ts runner-rs runner-java runner-godot up down logs test test-sandbox sandbox-check runs-clean check status approve diff pool claude-token claude-token-paste claude-token-check board db-board backup restore project-add project-list project-rebuild project-rebuild-all project-pause project-resume project-limit project-labelers project-remove
+.PHONY: help init lock db hoststat runner-py runner-ts runner-rs runner-java runner-godot up down logs test test-sandbox sandbox-check runs-clean check status approve criteria-ok diff pool claude-token claude-token-paste claude-token-check board db-board backup restore project-add project-list project-rebuild project-rebuild-all project-pause project-resume project-limit project-labelers project-remove
 
 help:
 	@echo "init      create folders, secrets placeholder, .env.factory (with generated database passwords)"
@@ -25,6 +25,7 @@ help:
 	@echo "project-labelers REPO=... LOGINS='a b'    extra GitHub logins allowed to label its issues"
 	@echo "project-remove REPO=...         forget a project (its history stays)"
 	@echo ""
+	@echo "criteria-ok RUN=<run_id>   approve the acceptance criteria the planner proposed (Gate 1)"
 	@echo "diff RUN=<run_id>      print the change a run made; read it before you approve"
 	@echo "backup / restore FILE=...      dump or restore the factory's database"
 	@echo "hoststat  install the macOS memory sensor (launchd)"
@@ -149,6 +150,10 @@ pool:
 approve:
 	@test -n "$(RUN)" || (echo "usage: make approve RUN=<run_id>" && exit 1)
 	$(COMPOSE) exec orchestrator python -m factory.runner approve $(RUN)
+
+criteria-ok:
+	@test -n "$(RUN)" || (echo "usage: make criteria-ok RUN=<run_id>" && exit 1)
+	$(COMPOSE) exec orchestrator python -m factory.runner criteria-ok $(RUN)
 
 diff:
 	@test -n "$(RUN)" || (echo "usage: make diff RUN=<run_id>" && exit 1)

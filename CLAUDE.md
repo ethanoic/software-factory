@@ -1,8 +1,8 @@
 # Working on the AI Software Factory
 
 A local service on one Mac (one operator, many projects) that turns labelled GitHub issues into draft PRs:
-plan → tests by a separate model → tests must fail first → code → sealed sandbox → QA → independent
-review → repair (≤ 3) → human approval → draft PR.
+plan → criteria approved by a person → tests by a separate model → tests must fail first → code → sealed
+sandbox → QA → independent review → repair (≤ 3) → human approval → draft PR.
 
 - **Spec (decisions, invariants, maintainer guide §7):** https://claude.ai/artifact/DkiySGK2a4xoLeyak7tewW
 - **Security review:** https://claude.ai/artifact/9smt2RTH3GVVdCnRpEpoU3
@@ -23,6 +23,9 @@ review → repair (≤ 3) → human approval → draft PR.
 6. A human approves before every push. PRs are drafts on `factory/*`. The factory never works on its own repo.
 7. Only registered projects are touched; the project record wins over the ticket.
 8. Text bound for a prompt, trace, comment or PR goes through `config.redact`.
+9. A person owns the acceptance criteria. Criteria written in the issue (`criteria.py`) are used verbatim;
+   criteria the planner proposed stop the run at `criteria_gate` until a person approves them
+   (`runner.approve_criteria`). No node sets `criteria_approved`, and `make resume` cannot pass the gate.
 
 ## Commands
 

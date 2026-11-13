@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
-from factory import depshash, patches, projects, prompts, review, signatures
+from factory import criteria, depshash, patches, projects, prompts, review, signatures
 from factory.breaker import PatchRejected, alert
 from factory.config import is_factory_repo, redact
 from factory.gateway import AUTHOR_ROLES, Task, TaskKind
@@ -44,7 +44,10 @@ def ingest(state, deps):
     if not REPO_RE.fullmatch(t.repo) or not BRANCH_RE.fullmatch(t.base_branch):
         return {"halt_reason": f"invalid repo or branch: {t.repo}@{t.base_branch}"}
     body = TAG_RE.sub("", html.unescape(t.body))[:16_000]
-    ticket = t.model_copy(update={"body": body, "title": t.title[:300]})
+    found = criteria.parse(body)
+    ticket = t.model_copy(update={"body": body, "title": t.title[:300],
+                                  "criteria": [redact(c) for c in found.testable],
+                                  "manual_checks": [redact(c) for c in found.manual]})
     if is_factory_repo(t.repo):
         return {"halt_reason": f"refused: {t.repo} is the factory's own repo. Change the factory by "
                                "pull request and `make up`, never through a factory run."}
@@ -106,11 +109,26 @@ def plan(state, deps):
         p = Plan(**{k: data[k] for k in ("summary", "target_files", "acceptance_criteria", "complexity") if k in data})
         for f in p.target_files:
             patches.validate_repo_path(f)
+        t = state["ticket"]
+        if t.criteria:                           # written by a person: used verbatim, whatever the model said
+            p = p.model_copy(update={"acceptance_criteria": list(t.criteria)})
         if not p.acceptance_criteria:
             raise ValueError("no acceptance criteria")
     except Exception as e:                       # invalid plan: halt, a human looks at it
         return {"halt_reason": f"plan invalid: {e}"[:500], "model_pins": gw.pins}
-    return {"plan": p, "model_pins": gw.pins}
+    return {"plan": p, "model_pins": gw.pins, "criteria_source": "issue" if state["ticket"].criteria else "proposed"}
+
+
+# ------------------------------------------------------------------ CRITERIA_GATE (a person, no model)
+def criteria_gate(state, deps):
+    """The graph stops before this node when the planner proposed the criteria (graph.compile_app). Only
+    `runner.approve_criteria`, acting for a person, sets criteria_approved. Resuming any other way stops."""
+    if not state.get("criteria_approved"):
+        return {"halt_reason": "acceptance criteria were not approved by a person. Approve them with the "
+                               "factory:criteria-ok label or make criteria-ok, not make resume"}
+    if not state["plan"].acceptance_criteria:
+        return {"halt_reason": "no acceptance criteria to test"}
+    return {"criteria_source": "approved"}
 
 
 # ------------------------------------------------------------------ WRITE_TESTS (Claude, independent)
@@ -533,7 +551,12 @@ def compile_pr(state, deps):
     spent = deps.breaker_for(state["run_id"]).spent()
     closes = f"Closes #{t.issue_number}\n\n" if t.issue_number else ""
     body = (f"{closes}Automated change for **{t.ticket_id}**.\n\n{state['plan'].summary}\n\n"
-            "**Acceptance criteria**\n" + "\n".join(f"- {c}" for c in state["plan"].acceptance_criteria) +
+            "**Acceptance criteria** (" + {"issue": "written in the issue",
+                                            "approved": "proposed by the planner, approved by a person"}.get(
+                state.get("criteria_source") or "", "source unknown") + ")\n"
+            + "\n".join(f"- {c}" for c in state["plan"].acceptance_criteria)
+            + ("\n\n**Check by hand** (no test can judge these)\n" + "\n".join(f"- [ ] {c}" for c in t.manual_checks)
+               if t.manual_checks else "") +
             f"\n\n**Run**: `{state['run_id']}` · repairs: {state.get('repair_attempts', 0)} · "
             f"billed cost: ${spent:.4f} · models: {json.dumps(state.get('model_pins', {}))}\n\n"
             f"**Checks**: {state['red_check'].detail if state.get('red_check') else 'tests-fail-first check not run'} "

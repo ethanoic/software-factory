@@ -221,6 +221,8 @@ in the label picker, so whoever triages issues sees what to add without reading 
 | --- | --- | --- |
 | `factory:ready` | green | Add this to have the AI factory work on the issue. Needs write access. |
 | `factory:approve` | purple | Add this to open the draft PR after the factory's tests pass. Needs write access. |
+| `factory:criteria-ok` | purple | Add this to approve the acceptance criteria, as they stand in the issue. Needs write access. |
+| `factory:awaiting-criteria` | yellow | Check the proposed acceptance criteria, then add factory:criteria-ok. |
 | `factory:awaiting-approval` | yellow | Tests passed. Add factory:approve to open the draft PR. |
 | `factory:pr-open` | yellow | Draft PR open. Review and merge it; merging closes the issue. |
 | `factory:halted` | red | Stopped. Read the factory's comment, then re-add factory:ready to retry. |
@@ -243,6 +245,8 @@ and is ignored, so strangers filing issues cannot spend your Claude plan.
 | — | `factory:running` → then one of the outcomes below, each with a short comment |
 | — | `factory:rejected` (triage said no) or `factory:halted` (reason given) |
 | — | `factory:parked` when the Claude plan limit is hit; resumes on its own |
+| — | `factory:awaiting-criteria` when the issue has no Acceptance criteria section (see below) |
+| Add `factory:criteria-ok` | Reads the criteria from the issue as it stands, writes the tests, carries on |
 | — | `factory:awaiting-approval` when tests and QA pass |
 | Add `factory:approve` | Opens the draft PR (`Closes #n`), sets `factory:pr-open` |
 | Re-add `factory:ready` to a finished issue | Starts a fresh run |
@@ -375,6 +379,31 @@ The sealed runner closes the review's two critical findings (F1 and F2). Three g
 - **Pushes may trigger the target repo's CI.** Approving pushes a `factory/*` branch. If that repo has
   workflows that run on every push with secrets, limit them to protected branches first.
 
+## Acceptance criteria: a person decides what "done" means
+
+The tests the factory writes are only as good as the criteria they test, so a person owns those. Write
+them in the issue, under an `Acceptance criteria` heading (any level), one bullet each:
+
+```markdown
+## Acceptance criteria
+- Given an empty name, when greet() is called, then it returns "Hello, World!"
+- Given "Ada", when greet() is called, then it returns "Hello, Ada!"
+- feel: the greeting reads as friendly, not formal
+```
+
+- **Written in the issue:** used word for word. The planner is told them and may not change them; the
+  code overwrites whatever it answers. The run goes straight on to the test writer.
+- **Not written:** the planner proposes criteria and the run stops at **Your criteria** before any test
+  is written (`factory:awaiting-criteria`, with the proposal as a comment you can paste back into the
+  issue). Add `factory:criteria-ok` to approve. If you edited the issue's section first, your version
+  wins. From the terminal: `make criteria-ok RUN=<run_id>` approves the proposal as it is. `make resume`
+  cannot get past this step; it stops the run instead.
+- **`feel:` (or `manual:`) bullets** are things no test can judge, such as how a game feels to play.
+  They never go to the test writer. They appear on the approval note, `make diff` and the PR body as a
+  "Check by hand" list.
+
+The PR body says where its criteria came from: written in the issue, or proposed and then approved.
+
 ## Independent checks: no model grades its own work
 
 The model that writes the code never decides whether it is done. Three checks sit between it and your
@@ -457,7 +486,7 @@ These need the running stack and are checked by hand in Phase 1:
 
 ## What has been tested, and what has not
 
-Tested in this build (`make test`, 222 tests with `FACTORY_TEST_DSN` set and Docker running; 39 need
+Tested in this build (`make test`, 245 tests with `FACTORY_TEST_DSN` set and Docker running; 43 need
 Postgres and 1 needs Docker):
 routing for all three `local_mode`s, diff validation and forbidden paths, every FSM router, the real
 LangGraph wiring with stubbed nodes (repair loop, 3-repair cap, human gate, tamper halt), the breaker

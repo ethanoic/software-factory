@@ -41,7 +41,7 @@ def stub_nodes(monkeypatch):
 
     monkeypatch.setattr(nodes, "ingest", lambda s, d: {"base_sha": "abc"})
     monkeypatch.setattr(nodes, "triage", lambda s, d: {"accepted": True})
-    monkeypatch.setattr(nodes, "plan", lambda s, d: {"plan": PLAN})
+    monkeypatch.setattr(nodes, "plan", lambda s, d: {"plan": PLAN, "criteria_source": "issue"})
     monkeypatch.setattr(nodes, "write_tests", lambda s, d: {"plan": PLAN, "tests_feedback": None})
     monkeypatch.setattr(nodes, "freeze_tests", lambda s, d: {"tests_sha256": "h"})
     monkeypatch.setattr(nodes, "red_check", lambda s, d: {"red_check": RedCheck(new_tests=2, new_failed=2)})

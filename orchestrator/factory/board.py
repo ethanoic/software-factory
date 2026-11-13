@@ -36,6 +36,7 @@ STATIONS = [
     ("queued", "Queued", ()),
     ("triage", "Triage", ("ingest", "triage")),
     ("plan", "Plan", ("plan",)),
+    ("criteria", "Your criteria", ("criteria_gate",)),
     ("tests", "Tests", ("write_tests", "freeze_tests", "red_check")),
     ("code", "Code", ("generate",)),
     ("sandbox", "Sandbox", ("sandbox",)),
@@ -142,6 +143,21 @@ def halt_help(detail: str, repo: str | None = None) -> tuple[str, list[dict]]:
 
 def card_action(card: dict) -> dict | None:
     status, ref = card["status"], card["ref"]
+    if status == "awaiting_criteria":
+        why = ("The issue had no Acceptance criteria section, so the planner proposed some. Nothing is tested "
+               "until you approve them: they decide what the tests check.")
+        steps = [step("Read the proposed criteria: " + " ".join((card.get("detail") or "").splitlines()[1:])[:600])]
+        if card["issue_url"]:
+            steps.append(step("If they are right, add the factory:criteria-ok label. If not, add an "
+                              "\"## Acceptance criteria\" section to the issue (one bullet each), then add the label.",
+                              url=card["issue_url"], url_label=f"Open issue #{card['number']}"))
+            steps.append(step("Or approve the proposal as it is, from the terminal:",
+                              command=f"make criteria-ok RUN={card['id']}"))
+        else:
+            steps.append(step("Approve them from the terminal (to change them, edit the ticket's Acceptance "
+                              "criteria section and start it again):", command=f"make criteria-ok RUN={card['id']}"))
+        return {"tone": "yours", "rank": 2, "title": f"Approve the acceptance criteria for {ref}", "why": why,
+                "steps": steps}
     if status == "awaiting_approval":
         repairs = card["repair_attempts"]
         why = ("The new tests and the security scan passed"
@@ -258,7 +274,7 @@ def build_board(dsn: str, inbox: pathlib.Path, now: float | None = None) -> dict
                    repair_attempts, models, pr_url, started_at, updated_at
             FROM runs
             WHERE run_id NOT LIKE 'qual-%%'
-              AND (status IN ('running', 'parked', 'awaiting_approval')
+              AND (status IN ('running', 'parked', 'awaiting_criteria', 'awaiting_approval')
                    OR (status IN ('halted', 'pr_open') AND updated_at > now() - interval '14 days')
                    OR (status IN ('done', 'rejected') AND updated_at > now() - interval '7 days'))
             ORDER BY ticket_id, started_at DESC""").fetchall()
@@ -280,6 +296,8 @@ def build_board(dsn: str, inbox: pathlib.Path, now: float | None = None) -> dict
             station = NODE_STATION.get(stage or "", "triage")
         elif status == "awaiting_approval":
             station = "approval"
+        elif status == "awaiting_criteria":
+            station = "criteria"
         elif status == "pr_open":
             station = "review"
         else:

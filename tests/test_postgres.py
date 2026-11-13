@@ -162,7 +162,7 @@ def test_quota_exhausted_parks_and_resumes_from_checkpoint(db, monkeypatch):
 
     def plan_node(s, d):
         calls["plan"] += 1
-        return {"plan": plan}
+        return {"plan": plan, "criteria_source": "issue"}
 
     def generate(s, d):
         calls["generate"] += 1

@@ -79,7 +79,9 @@ class FakeGitHub:
             return httpx.Response(200, json={"role_name": role}) if role else httpx.Response(404)
         if m == "GET" and parts[-2] == "issues":
             n = int(parts[-1])
-            return httpx.Response(200, json={"labels": [{"name": x} for x in self.issues[n]["labels"]]})
+            return httpx.Response(200, json={"labels": [{"name": x} for x in self.issues[n]["labels"]],
+                                             "title": self.issues[n]["title"], "body": self.issues[n]["body"],
+                                             "state": "open"})
         if m == "POST" and p.endswith("/labels") and "/issues/" in p:
             n = int(parts[-2])
             self.issues[n]["labels"] |= set(json.loads(req.content)["labels"])
@@ -223,3 +225,46 @@ def test_custom_label_names_flow_into_the_descriptions():
     specs = label_specs(validate({"repos": [{"repo": REPO}], "trigger_label": "ai:go", "approve_label": "ai:ship"}))
     assert "ai:go" in specs and "ai:ship" in specs
     assert "re-add ai:go" in specs["factory:halted"][1] and "Add ai:ship" in specs["factory:awaiting-approval"][1]
+
+
+# ------------------------------------------------------------------ Gate 1: acceptance criteria
+@needs_db
+def test_criteria_label_approves_and_the_issue_section_wins(env):
+    fake, intake, _ = env
+    fake.add_issue(11, "Add shout()", "Please add shout.", labelled_by="maintainer")
+    (t,) = intake.poll()
+    intake.report(t, "run-11", "awaiting_criteria", "## Acceptance criteria\n- shout('a') returns 'A'")
+    assert "factory:awaiting-criteria" in fake.issues[11]["labels"]
+    assert any(n == 11 and "factory:criteria-ok" in body and "shout('a') returns 'A'" in body
+               for n, body in fake.comments)
+    assert intake.criteria_approvals() == []                              # nobody approved yet
+    fake.label(11, "factory:criteria-ok", "outsider")
+    assert intake.criteria_approvals() == []                              # wrong person: ignored, label removed
+    assert "factory:criteria-ok" not in fake.issues[11]["labels"]
+    fake.issues[11]["body"] = ("Please add shout.\n\n## Acceptance criteria\n- shout('ada') returns 'ADA'\n"
+                               "- feel: reads as a shout\n")
+    fake.label(11, "factory:criteria-ok", "maintainer")
+    ((run_id, found),) = intake.criteria_approvals()
+    assert run_id == "run-11"
+    assert found.testable == ["shout('ada') returns 'ADA'"] and found.manual == ["reads as a shout"]
+
+
+@needs_db
+def test_criteria_label_without_a_section_approves_the_proposal(env):
+    fake, intake, _ = env
+    fake.add_issue(12, "t", "no criteria here", labelled_by="maintainer")
+    (t,) = intake.poll()
+    intake.report(t, "run-12", "awaiting_criteria", "## Acceptance criteria\n- x")
+    fake.label(12, "factory:criteria-ok", "maintainer")
+    ((run_id, found),) = intake.criteria_approvals()
+    assert run_id == "run-12" and not found                               # empty: keep the planner's proposal
+
+
+@needs_db
+def test_a_run_waiting_for_criteria_is_never_queued_twice(env):
+    fake, intake, _ = env
+    fake.add_issue(13, "t", labelled_by="maintainer")
+    (t,) = intake.poll()
+    intake.report(t, "run-13", "awaiting_criteria", "x")
+    fake.label(13, "factory:ready", "maintainer")
+    assert intake.poll() == []
