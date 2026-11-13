@@ -25,10 +25,11 @@ from factory.state import TicketSpec
 
 API = "https://api.github.com"
 TRUSTED_ROLES = {"admin", "maintain", "write"}
-ACTIVE = ("queued", "running", "awaiting_criteria", "awaiting_approval", "parked")
+ACTIVE = ("queued", "running", "awaiting_criteria", "awaiting_arch_approval", "awaiting_approval", "parked")
 STATUS_LABELS = {
     "queued": "factory:queued", "running": "factory:running", "awaiting_criteria": "factory:awaiting-criteria",
     "awaiting_approval": "factory:awaiting-approval", "pr_open": "factory:pr-open",
+    "awaiting_arch_approval": "factory:awaiting-arch-approval",
     "halted": "factory:halted", "rejected": "factory:rejected", "parked": "factory:parked",
 }
 # Colours match the board: strong for the labels people add, yellow when it is your move,
@@ -39,12 +40,14 @@ GREEN, PURPLE, YELLOW, RED, GREY = "1f883d", "8250df", "fbca04", "d73a4a", "d0d7
 def label_specs(cfg: dict) -> dict[str, tuple[str, str]]:
     """name -> (colour, description). GitHub shows the description under each label in the label picker,
     so this is where whoever triages issues learns what to add. Descriptions are capped at 100 chars."""
-    ready, approve, crit = cfg["trigger_label"], cfg["approve_label"], cfg["criteria_label"]
+    ready, approve, crit, arch = cfg["trigger_label"], cfg["approve_label"], cfg["criteria_label"], cfg["arch_label"]
     by_factory = "Set by the factory, don't change by hand:"
     specs = {
         ready: (GREEN, "Add this to have the AI factory work on the issue. Needs write access."),
         crit: (PURPLE, "Add this to approve the acceptance criteria, as they stand in the issue. Needs write access."),
         STATUS_LABELS["awaiting_criteria"]: (YELLOW, f"Check the proposed acceptance criteria, then add {crit}."),
+        arch: (PURPLE, "Add this to push a change that alters the architecture, after reading why. Needs write access."),
+        STATUS_LABELS["awaiting_arch_approval"]: (YELLOW, f"Checks passed; the change alters the architecture. Add {arch}."),
         approve: (PURPLE, "Add this to open the draft PR after the factory's tests pass. Needs write access."),
         STATUS_LABELS["queued"]: (GREY, f"{by_factory} waiting for a free slot."),
         STATUS_LABELS["running"]: (GREY, f"{by_factory} working on it now."),
@@ -75,6 +78,7 @@ def validate(cfg: dict) -> dict:
     cfg.setdefault("trigger_label", "factory:ready")
     cfg.setdefault("approve_label", "factory:approve")
     cfg.setdefault("criteria_label", "factory:criteria-ok")
+    cfg.setdefault("arch_label", "factory:arch-approve")
     cfg.setdefault("labelers", [])
     cfg.setdefault("comment_on_status", True)
     if int(cfg["poll_interval_s"]) < 60:
@@ -289,6 +293,33 @@ class Intake:
                 print(f"[github] approval check {repo}#{n} failed: {e}", flush=True)
         return out
 
+    def arch_approvals(self) -> list[str]:
+        """Run ids waiting at Gate 3 whose issue got the architecture label from an authorized user. The
+        ordinary approve label is not enough for these: it is removed with a comment saying why."""
+        label, plain = self.cfg["arch_label"], self.cfg["approve_label"]
+        with psycopg.connect(self.dsn) as c:
+            rows = c.execute("SELECT repo, number, run_id FROM github_issues "
+                             "WHERE status='awaiting_arch_approval'").fetchall()
+        out = []
+        for repo, n, run_id in rows:
+            try:
+                labels = self.gh.labels_of(repo, n)
+                if plain in labels:
+                    self.gh.remove_label(repo, n, plain)
+                    self.gh.comment(repo, n, f"`{plain}` is not enough here: this change alters the architecture "
+                                             f"(see the comment above). Add `{label}` once you have checked it.")
+                if label not in labels:
+                    continue
+                who = self.gh.labeler(repo, n, label)
+                self.gh.remove_label(repo, n, label)
+                if self.authorized(repo, who):
+                    out.append(run_id)
+                else:
+                    self.gh.comment(repo, n, f"`{label}` was applied by @{who or 'unknown'}, who lacks write access; ignored.")
+            except httpx.HTTPError as e:
+                print(f"[github] architecture approval check {repo}#{n} failed: {e}", flush=True)
+        return out
+
     def criteria_approvals(self) -> list[tuple[str, "criteria.Criteria"]]:
         """(run id, criteria) for runs waiting at Gate 1 whose issue got the criteria label from an authorized
         user. The criteria are read from the issue as it stands now: if the person added or edited an
@@ -346,6 +377,11 @@ class Intake:
                     "awaiting_approval": f"Tests and QA passed.\n\n{detail}\n\nRead the change first: on the factory "
                                          f"computer, run `make diff RUN={run_id}`. Then add "
                                          f"`{self.cfg['approve_label']}` to open the draft PR.",
+                    "awaiting_arch_approval": f"Tests, QA and the independent review passed, but this change "
+                                              f"alters the architecture.\n\n{detail}\n\nRead the change first: on the "
+                                              f"factory computer, run `make diff RUN={run_id}`. To push it, add "
+                                              f"`{self.cfg['arch_label']}` (`{self.cfg['approve_label']}` is not "
+                                              f"enough for this one).",
                     "pr_open": f"Draft PR opened: {detail}",
                     "halted": f"Factory run `{run_id}` halted: {detail}",
                     "rejected": f"Not taken by the factory: {detail}. Edit the issue and re-add "

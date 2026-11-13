@@ -223,6 +223,8 @@ in the label picker, so whoever triages issues sees what to add without reading 
 | `factory:approve` | purple | Add this to open the draft PR after the factory's tests pass. Needs write access. |
 | `factory:criteria-ok` | purple | Add this to approve the acceptance criteria, as they stand in the issue. Needs write access. |
 | `factory:awaiting-criteria` | yellow | Check the proposed acceptance criteria, then add factory:criteria-ok. |
+| `factory:arch-approve` | purple | Add this to push a change that alters the architecture, after reading why. Needs write access. |
+| `factory:awaiting-arch-approval` | yellow | Checks passed; the change alters the architecture. Add factory:arch-approve. |
 | `factory:awaiting-approval` | yellow | Tests passed. Add factory:approve to open the draft PR. |
 | `factory:pr-open` | yellow | Draft PR open. Review and merge it; merging closes the issue. |
 | `factory:halted` | red | Stopped. Read the factory's comment, then re-add factory:ready to retry. |
@@ -248,6 +250,8 @@ and is ignored, so strangers filing issues cannot spend your Claude plan.
 | — | `factory:awaiting-criteria` when the issue has no Acceptance criteria section (see below) |
 | Add `factory:criteria-ok` | Reads the criteria from the issue as it stands, writes the tests, carries on |
 | — | `factory:awaiting-approval` when tests and QA pass |
+| — | `factory:awaiting-arch-approval` instead, when the change alters the architecture (see below) |
+| Add `factory:arch-approve` | Opens the draft PR for that change. `factory:approve` is removed with a comment |
 | Add `factory:approve` | Opens the draft PR (`Closes #n`), sets `factory:pr-open` |
 | Re-add `factory:ready` to a finished issue | Starts a fresh run |
 
@@ -404,6 +408,30 @@ them in the issue, under an `Acceptance criteria` heading (any level), one bulle
 
 The PR body says where its criteria came from: written in the issue, or proposed and then approved.
 
+## Architecture changes: a check, not a model, asks you
+
+After the independent review, `arch_check` reads the paths the final patch touches. No model is
+involved. If any path falls in one of these classes, the ordinary approval is not enough:
+
+| Class | Examples |
+| --- | --- |
+| Container image or compose file | `Dockerfile*`, `Containerfile`, `compose*.yml`, `.dockerignore` |
+| Infrastructure as code | `*.tf`, `*.bicep`, anything under `k8s/`, `helm/`, `charts/`, `infra/`, `deploy/` |
+| Test harness configuration | root or package `conftest.py`, `pytest.ini`, `jest.config.*`, `.gutconfig.json`: these can change what the frozen tests prove |
+| Code that runs at build or install time | `build.rs`, `.cargo/config*`, `.mvn/`, `Makefile`, `setup.py`, shell scripts |
+| Environment or registry configuration | `.env*`, `.npmrc`, `.pypirc`, `.netrc` |
+| Ownership, permissions, entitlements | `CODEOWNERS`, `.gitmodules`, `.gitattributes`, `*.entitlements`, `AndroidManifest.xml`, `Info.plist` |
+| Engine or export configuration | `project.godot`, `export_presets.cfg`, an addon's `plugin.cfg` |
+| A new top-level folder | a new module, package or service |
+
+Such a run waits as `factory:awaiting-arch-approval`, with the reasons and a checklist. Read
+`make diff`, then add `factory:arch-approve` (or `make arch-ok RUN=…`): that is the push approval too.
+`factory:approve` and `make approve` are refused for it. Dependency manifests, lockfiles, CI workflows
+and the frozen tests are not in this list because patches can never touch them at all.
+
+This is a backstop for the reviewer, not a replacement. The reviewer already blocks build and tool
+configuration; this check catches what a model might miss, and does it the same way every time.
+
 ## Independent checks: no model grades its own work
 
 The model that writes the code never decides whether it is done. Three checks sit between it and your
@@ -486,7 +514,7 @@ These need the running stack and are checked by hand in Phase 1:
 
 ## What has been tested, and what has not
 
-Tested in this build (`make test`, 245 tests with `FACTORY_TEST_DSN` set and Docker running; 43 need
+Tested in this build (`make test`, 284 tests with `FACTORY_TEST_DSN` set and Docker running; 44 need
 Postgres and 1 needs Docker):
 routing for all three `local_mode`s, diff validation and forbidden paths, every FSM router, the real
 LangGraph wiring with stubbed nodes (repair loop, 3-repair cap, human gate, tamper halt), the breaker

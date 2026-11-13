@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
-from factory import criteria, depshash, patches, projects, prompts, review, signatures
+from factory import archgate, criteria, depshash, patches, projects, prompts, review, signatures
 from factory.breaker import PatchRejected, alert
 from factory.config import is_factory_repo, redact
 from factory.gateway import AUTHOR_ROLES, Task, TaskKind
@@ -527,10 +527,22 @@ def repair(state, deps):
             "repair_attempts": n, "qa": None, "review": None, "model_pins": gw.pins, "attempts": [record]}
 
 
+# ------------------------------------------------------------------ ARCH_CHECK (T1, no model)
+def arch_check(state, deps):
+    """Gate 3, decided by code: does the final patch change how the project is built, deployed or trusted?
+    If so, only factory:arch-approve (or make arch-ok) can push it (runner.approve_push)."""
+    repo = deps.repo_path(state)
+    top = set(patches.git(repo, "ls-tree", "--name-only", state["base_sha"]).stdout.decode().split())
+    return {"arch_triggers": archgate.triggers(state["patch"].unified_diff, top)}
+
+
 # ------------------------------------------------------------------ COMPILE_PR (T1, human-gated)
 def compile_pr(state, deps):
     if state.get("dry_run"):
         return {"pr_url": "dry-run"}
+    if state.get("arch_triggers") and not state.get("arch_approved"):
+        return {"halt_reason": "this change alters the architecture and was not approved for that. Approve it "
+                               "with the factory:arch-approve label or make arch-ok, not make resume or make approve"}
     t, repo = state["ticket"], deps.repo_path(state)
     branch = "factory/" + re.sub(r"[^a-z0-9-]+", "-", t.ticket_id.lower())
     gitenv = {**deps.git_auth_env(),
@@ -564,6 +576,8 @@ def compile_pr(state, deps):
             f"{(state.get('model_pins') or {}).get('write_tests', '?')} "
             f"({(state.get('independence') or {}).get('write_tests', 'independence unknown')}).\n\n"
             f"{review.summary(state.get('review'))}\n\n"
+            + ("**Architecture change, approved by a person**\n" + "\n".join(f"- {x}" for x in state["arch_triggers"])
+               + "\n\n" if state.get("arch_triggers") else "")
             + (f"**Trace**: {trace_url(state['run_id'])}\n" if trace_url(state["run_id"]) else ""))
     r = httpx.post(f"https://api.github.com/repos/{t.repo}/pulls", timeout=30,
                    headers={"Authorization": f"Bearer {deps.github_token()}",

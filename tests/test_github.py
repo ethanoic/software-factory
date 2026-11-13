@@ -268,3 +268,22 @@ def test_a_run_waiting_for_criteria_is_never_queued_twice(env):
     intake.report(t, "run-13", "awaiting_criteria", "x")
     fake.label(13, "factory:ready", "maintainer")
     assert intake.poll() == []
+
+
+# ------------------------------------------------------------------ Gate 3: architecture approval
+@needs_db
+def test_architecture_changes_need_their_own_label(env):
+    fake, intake, _ = env
+    fake.add_issue(21, "t", labelled_by="maintainer")
+    (t,) = intake.poll()
+    intake.report(t, "run-21", "awaiting_arch_approval", "Architecture gate: this change touches\n- Dockerfile: x")
+    assert "factory:awaiting-arch-approval" in fake.issues[21]["labels"]
+    assert any(n == 21 and "factory:arch-approve" in b and "Dockerfile" in b for n, b in fake.comments)
+    fake.label(21, "factory:approve", "maintainer")                     # the ordinary label is not enough
+    assert intake.approvals() == [] and intake.arch_approvals() == []
+    assert "factory:approve" not in fake.issues[21]["labels"]
+    assert any(n == 21 and "is not enough here" in b for n, b in fake.comments)
+    fake.label(21, "factory:arch-approve", "outsider")
+    assert intake.arch_approvals() == []
+    fake.label(21, "factory:arch-approve", "maintainer")
+    assert intake.arch_approvals() == ["run-21"]

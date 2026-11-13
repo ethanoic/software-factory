@@ -9,7 +9,7 @@ const DOING = {
   write_tests: "Writing the tests",
   freeze_tests: "Freezing the tests", red_check: "Checking the tests fail first",
   generate: "Writing code", sandbox: "Running the tests", qa: "Security scan",
-  review_code: "Independent review", repair: "Repairing",
+  review_code: "Independent review", arch_check: "Checking for architecture changes", repair: "Repairing",
   compile_pr: "Opening the PR",
 };
 
@@ -199,6 +199,7 @@ function tagState(card) {
     case "halted": return { tone: "stopped", text: "Stopped. See Your move" };
     case "awaiting_criteria": return { tone: "yours", text: "Waiting for you to approve the criteria" };
     case "awaiting_approval": return { tone: "yours", text: "Waiting for your approval" };
+    case "awaiting_arch_approval": return { tone: "yours", text: "Architecture change: waiting for your approval" };
     case "pr_open": return { tone: "yours", text: "PR waiting for your review" };
     default: return { tone: "moving", text: card.status };
   }

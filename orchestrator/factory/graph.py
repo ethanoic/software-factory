@@ -60,7 +60,7 @@ def route_after_review(s: FactoryState) -> str:
         return "halt"
     rv = s.get("review")
     if rv is None or not rv.blocked:
-        return "compile_pr"
+        return "arch_check"
     return "repair" if s.get("repair_attempts", 0) < MAX_REPAIRS else "halt"
 
 
@@ -89,13 +89,13 @@ def build(deps):
 
     g = StateGraph(FactoryState)
     for name in ("ingest", "triage", "plan", "criteria_gate", "write_tests", "freeze_tests", "red_check", "generate",
-                 "sandbox", "qa", "review_code", "repair", "compile_pr"):
+                 "sandbox", "qa", "review_code", "arch_check", "repair", "compile_pr"):
         g.add_node(name, guarded(getattr(nodes, name), deps, node_name=name))
     g.add_node("halt", nodes.halt)                       # never guarded: must always run
 
     g.add_edge(START, "ingest")
     for src, dst in (("ingest", "triage"), ("criteria_gate", "write_tests"), ("write_tests", "freeze_tests"),
-                     ("freeze_tests", "red_check")):
+                     ("freeze_tests", "red_check"), ("arch_check", "compile_pr")):
         g.add_conditional_edges(src, next_or_halt(dst), {dst: dst, "halt": "halt"})
     g.add_conditional_edges("red_check", route_after_red_check,
                             {"generate": "generate", "write_tests": "write_tests", "halt": "halt"})
@@ -107,14 +107,15 @@ def build(deps):
     g.add_conditional_edges("sandbox", route_after_sandbox, {"qa": "qa", "repair": "repair", "halt": "halt"})
     g.add_conditional_edges("qa", route_after_qa, {"review_code": "review_code", "repair": "repair", "halt": "halt"})
     g.add_conditional_edges("review_code", route_after_review,
-                            {"compile_pr": "compile_pr", "repair": "repair", "halt": "halt"})
+                            {"arch_check": "arch_check", "repair": "repair", "halt": "halt"})
     g.add_conditional_edges("repair", route_after_repair, {"sandbox": "sandbox", "repair": "repair", "halt": "halt"})
     g.add_conditional_edges("compile_pr", route_after_pr, {"end": END, "halt": "halt"})
     g.add_edge("halt", END)
     return g
 
 
-HUMAN_GATES = ["criteria_gate", "compile_pr"]   # Gate 1 (criteria) and Gate 4a (push). Only a person resumes.
+# Gate 1 (criteria) and Gate 4a (push; Gate 3 when arch_check found triggers). Only a person resumes these.
+HUMAN_GATES = ["criteria_gate", "compile_pr"]
 
 
 def compile_app(deps, saver, *, human_gate: bool = True):
