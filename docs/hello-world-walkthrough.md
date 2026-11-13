@@ -198,7 +198,9 @@ The board shows each of these steps as it happens; the issue labels show the sam
 | You merge the PR | Issue closes | Done |
 
 **Review the PR before merging:** expect a small change to `src/greet.js` plus a new test file under
-`tests/` that encodes your acceptance criteria. Click **Ready for review**, then merge.
+`tests/` that encodes your acceptance criteria. Click **Ready for review**, then merge. If it is not right,
+comment what is wrong on the issue (start with `bug:`), then add `factory:rework`: the factory writes a new
+change and updates the same PR (README, "Sending a change back").
 
 **Issue C** ends as `factory:rejected` with a comment giving the reason. It is refused before any model is
 called, because it mentions an API key and a CI pipeline.

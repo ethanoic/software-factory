@@ -41,12 +41,14 @@ def label_specs(cfg: dict) -> dict[str, tuple[str, str]]:
     """name -> (colour, description). GitHub shows the description under each label in the label picker,
     so this is where whoever triages issues learns what to add. Descriptions are capped at 100 chars."""
     ready, approve, crit, arch = cfg["trigger_label"], cfg["approve_label"], cfg["criteria_label"], cfg["arch_label"]
+    rework = cfg["rework_label"]
     by_factory = "Set by the factory, don't change by hand:"
     specs = {
         ready: (GREEN, "Add this to have the AI factory work on the issue. Needs write access."),
         crit: (PURPLE, "Add this to approve the acceptance criteria, as they stand in the issue. Needs write access."),
         STATUS_LABELS["awaiting_criteria"]: (YELLOW, f"Check the proposed acceptance criteria, then add {crit}."),
         arch: (PURPLE, "Add this to push a change that alters the architecture, after reading why. Needs write access."),
+        rework: (PURPLE, "Comment what's wrong (start with bug: or spec:), then add this to send the change back."),
         STATUS_LABELS["awaiting_arch_approval"]: (YELLOW, f"Checks passed; the change alters the architecture. Add {arch}."),
         approve: (PURPLE, "Add this to open the draft PR after the factory's tests pass. Needs write access."),
         STATUS_LABELS["queued"]: (GREY, f"{by_factory} waiting for a free slot."),
@@ -79,6 +81,7 @@ def validate(cfg: dict) -> dict:
     cfg.setdefault("approve_label", "factory:approve")
     cfg.setdefault("criteria_label", "factory:criteria-ok")
     cfg.setdefault("arch_label", "factory:arch-approve")
+    cfg.setdefault("rework_label", "factory:rework")
     cfg.setdefault("labelers", [])
     cfg.setdefault("comment_on_status", True)
     if int(cfg["poll_interval_s"]) < 60:
@@ -152,6 +155,14 @@ class GitHub:
         r = self.c.delete(f"/repos/{repo}/issues/{number}/labels/{name}")
         if r.status_code not in (200, 204, 404):
             r.raise_for_status()
+
+    def last_comment_by(self, repo: str, number: int, login: str) -> str | None:
+        """The newest comment on an issue written by `login`, or None. Reads the newest 100 comments."""
+        r = self.c.get(f"/repos/{repo}/issues/{number}/comments", params={"per_page": 100, "sort": "created",
+                                                                          "direction": "desc"})
+        r.raise_for_status()
+        mine = [c for c in r.json() if (c.get("user") or {}).get("login") == login]
+        return max(mine, key=lambda c: c.get("created_at", ""))["body"] if mine else None
 
     def comment(self, repo: str, number: int, body: str) -> None:
         self.c.post(f"/repos/{repo}/issues/{number}/comments", json={"body": redact(body)}).raise_for_status()
@@ -293,6 +304,48 @@ class Intake:
                 print(f"[github] approval check {repo}#{n} failed: {e}", flush=True)
         return out
 
+    REWORKABLE = ("pr_open", "awaiting_approval", "awaiting_arch_approval")
+
+    def reworks(self) -> list[TicketSpec]:
+        """Issues whose change a person sent back: the rework label from an authorized user, and that user's
+        newest comment as the reason. Each becomes a new run of the same ticket, carrying the reason."""
+        label = self.cfg["rework_label"]
+        with psycopg.connect(self.dsn) as c:
+            rows = c.execute("SELECT repo, number FROM github_issues WHERE status = ANY(%s)",
+                             (list(self.REWORKABLE),)).fetchall()
+        queued = []
+        projects = {p["repo"].lower(): p for p in self.projects()}
+        for repo, n in rows:
+            try:
+                if label not in self.gh.labels_of(repo, n):
+                    continue
+                who = self.gh.labeler(repo, n, label)
+                self.gh.remove_label(repo, n, label)
+                if not self.authorized(repo, who):
+                    self.gh.comment(repo, n, f"`{label}` was applied by @{who or 'unknown'}, who lacks write access; ignored.")
+                    continue
+                reason = (self.gh.last_comment_by(repo, n, who) or "").strip()
+                if not reason:
+                    self.gh.comment(repo, n, f"Say what is wrong in a comment first (start it with `bug:` if the code "
+                                             f"misses the criteria, `spec:` if the criteria were wrong), then add "
+                                             f"`{label}` again.")
+                    continue
+                p = projects.get(repo.lower())
+                if p is None:
+                    continue
+                issue, _ = self.gh.get(f"/repos/{repo}/issues/{n}")
+                t = TicketSpec(ticket_id=f"{repo}#{n}", title=issue.get("title") or "", body=issue.get("body") or "",
+                               repo=repo, base_branch=p["base_branch"], language=p["language"], issue_number=n,
+                               rework=redact(reason)[:4000])
+                (self.inbox / f"{repo.replace('/', '__')}__{n}__rework.json").write_text(t.model_dump_json())
+                self._record(repo, n, "queued")
+                self._set_label(repo, n, "queued")
+                queued.append(t)
+                print(f"[github] rework queued for {repo}#{n} (by @{who})", flush=True)
+            except httpx.HTTPError as e:
+                print(f"[github] rework check {repo}#{n} failed: {e}", flush=True)
+        return queued
+
     def arch_approvals(self) -> list[str]:
         """Run ids waiting at Gate 3 whose issue got the architecture label from an authorized user. The
         ordinary approve label is not enough for these: it is removed with a comment saying why."""
@@ -382,8 +435,13 @@ class Intake:
                                               f"factory computer, run `make diff RUN={run_id}`. To push it, add "
                                               f"`{self.cfg['arch_label']}` (`{self.cfg['approve_label']}` is not "
                                               f"enough for this one).",
-                    "pr_open": f"Draft PR opened: {detail}",
-                    "halted": f"Factory run `{run_id}` halted: {detail}",
+                    "pr_open": f"Draft PR opened: {detail}\n\nNot right? Comment what's wrong (start with `bug:` if "
+                               f"the code misses the criteria, `spec:` if the criteria were wrong), then add "
+                               f"`{self.cfg['rework_label']}`. A code fix updates this same PR.",
+                    "halted": f"Factory run `{run_id}` halted: {detail}\n\nWhat next: if the acceptance criteria were "
+                              f"wrong or vague, fix the issue's Acceptance criteria section; if the ticket is too big, "
+                              f"split it. Then re-add `{self.cfg['trigger_label']}`: the next run is told why this "
+                              f"one stopped. Or take it over by hand, or close the issue.",
                     "rejected": f"Not taken by the factory: {detail}. Edit the issue and re-add "
                                 f"`{self.cfg['trigger_label']}` to retry.",
                     "parked": "Paused: the Claude plan limit was reached. The run resumes automatically.",

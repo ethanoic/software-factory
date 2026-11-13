@@ -5,6 +5,7 @@ trigger_label: "factory:ready"        # a maintainer adds this to hand an issue 
 approve_label: "factory:approve"      # a maintainer adds this to open the draft PR (human gate, D1)
 criteria_label: "factory:criteria-ok" # a maintainer adds this to approve proposed acceptance criteria (Gate 1)
 arch_label: "factory:arch-approve"    # a maintainer adds this to push a change that alters the architecture (Gate 3)
+rework_label: "factory:rework"        # a maintainer comments what's wrong, then adds this to send a change back
 
 # Who may apply the two labels above. Empty = anyone with write, maintain or admin access.
 # Logins listed here are trusted even without write access.

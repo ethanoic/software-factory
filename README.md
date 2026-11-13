@@ -225,6 +225,7 @@ in the label picker, so whoever triages issues sees what to add without reading 
 | `factory:awaiting-criteria` | yellow | Check the proposed acceptance criteria, then add factory:criteria-ok. |
 | `factory:arch-approve` | purple | Add this to push a change that alters the architecture, after reading why. Needs write access. |
 | `factory:awaiting-arch-approval` | yellow | Checks passed; the change alters the architecture. Add factory:arch-approve. |
+| `factory:rework` | purple | Comment what's wrong (start with bug: or spec:), then add this to send the change back. |
 | `factory:awaiting-approval` | yellow | Tests passed. Add factory:approve to open the draft PR. |
 | `factory:pr-open` | yellow | Draft PR open. Review and merge it; merging closes the issue. |
 | `factory:halted` | red | Stopped. Read the factory's comment, then re-add factory:ready to retry. |
@@ -253,7 +254,8 @@ and is ignored, so strangers filing issues cannot spend your Claude plan.
 | — | `factory:awaiting-arch-approval` instead, when the change alters the architecture (see below) |
 | Add `factory:arch-approve` | Opens the draft PR for that change. `factory:approve` is removed with a comment |
 | Add `factory:approve` | Opens the draft PR (`Closes #n`), sets `factory:pr-open` |
-| Re-add `factory:ready` to a finished issue | Starts a fresh run |
+| Comment what's wrong, then add `factory:rework` (on an approval or an open PR) | Queues a new run of the same ticket carrying your comment (see "Sending a change back") |
+| Re-add `factory:ready` to a finished or halted issue | Starts a new run, told how the previous one ended |
 
 Set `enabled: false` in `github.yaml` to run on the inbox folder only. Inbox tickets must name a
 registered project in `repo`; others are moved to `workspace/inbox/rejected/`.
@@ -408,6 +410,26 @@ them in the issue, under an `Acceptance criteria` heading (any level), one bulle
 
 The PR body says where its criteria came from: written in the issue, or proposed and then approved.
 
+## Sending a change back, and retrying
+
+**Every new run on an issue knows how the last one ended.** Before it starts, the factory looks up the
+issue's previous run. If that run halted, the planner is told why, and what its last three repair attempts
+tried, so a retry does not repeat them. Re-add `factory:ready` to retry; fix the issue's Acceptance criteria
+section first if they were the problem, or split the issue if it was too big. The halt comment says so.
+
+**To send a change back** (waiting for your approval, or a draft PR you don't want to merge), comment
+what is wrong and add `factory:rework`. Start the comment with:
+
+- `bug:` when the code misses the criteria as written. A new run gets your comment and the previous diff,
+  and writes a fresh change. It pushes to the same `factory/<ticket>` branch, so the same PR updates.
+- `spec:` when the criteria themselves were wrong. No code is written: the run stops at triage and asks you
+  to fix the Acceptance criteria section, then re-add `factory:ready`.
+
+Without a prefix, the local triage model decides, and anything unclear is treated as `spec:`, because only
+a person can fix a requirement. The label counts only from someone with write access, and only with a
+comment from that person; a change still waiting for approval is marked `superseded` on the board.
+From the terminal: `make rework RUN=<run_id> REASON='bug: …'`.
+
 ## Architecture changes: a check, not a model, asks you
 
 After the independent review, `arch_check` reads the paths the final patch touches. No model is
@@ -514,7 +536,7 @@ These need the running stack and are checked by hand in Phase 1:
 
 ## What has been tested, and what has not
 
-Tested in this build (`make test`, 284 tests with `FACTORY_TEST_DSN` set and Docker running; 44 need
+Tested in this build (`make test`, 302 tests with `FACTORY_TEST_DSN` set and Docker running; 49 need
 Postgres and 1 needs Docker):
 routing for all three `local_mode`s, diff validation and forbidden paths, every FSM router, the real
 LangGraph wiring with stubbed nodes (repair loop, 3-repair cap, human gate, tamper halt), the breaker

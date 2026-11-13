@@ -88,6 +88,8 @@ def triage(state, deps):
     if m:
         return {"accepted": False, "triage_reason": f"out of scope for automation (matched '{m.group(0)}')"}
     gw = deps.gateway_for(state)
+    if t.rework:                                  # a person sent a change back: is it the code or the spec?
+        return _triage_rework(state, t, gw)
     raw, _ = gw.complete(Task(TaskKind.TRIAGE_CLASSIFY, prompts.triage(t), max_output_tokens=200,
                               node="triage"), run_id=state["run_id"])
     try:
@@ -98,11 +100,36 @@ def triage(state, deps):
     return {"accepted": accepted, "triage_reason": reason, "model_pins": gw.pins}
 
 
+REWORK_PREFIX = re.compile(r"^\s*(bug|spec)\s*:", re.I)
+SPEC_ADVICE = ("the feedback is about the requirements, not the code. Edit the issue's Acceptance criteria "
+               "section to say what you want, then add factory:ready again")
+
+
+def _triage_rework(state, t: TicketSpec, gw) -> dict:
+    """bug -> another try at the code, told the reason and its previous diff. spec -> back to the person.
+    The person decides by starting the reason with `bug:` or `spec:`; otherwise the triage model does,
+    and anything unclear goes back to the person."""
+    m = REWORK_PREFIX.match(t.rework)
+    if m:
+        kind, why = m.group(1).lower(), "the person said so"
+    else:
+        raw, _ = gw.complete(Task(TaskKind.TRIAGE_CLASSIFY, prompts.rework_triage(t), max_output_tokens=200,
+                                  node="triage"), run_id=state["run_id"])
+        try:
+            verdict = _json(raw)
+            kind, why = str(verdict.get("kind", "spec")).lower(), str(verdict.get("reason", ""))[:300]
+        except (ValueError, json.JSONDecodeError):
+            kind, why = "spec", "the triage answer could not be read"
+    if kind == "bug":
+        return {"accepted": True, "triage_reason": f"rework: a code fix ({why})", "model_pins": gw.pins}
+    return {"accepted": False, "triage_reason": f"{SPEC_ADVICE} ({why})", "model_pins": gw.pins}
+
+
 # ------------------------------------------------------------------ PLAN (Claude)
 def plan(state, deps):
     repo = deps.repo_path(state)
     gw = deps.gateway_for(state)
-    raw, _ = gw.complete(Task(TaskKind.PLAN, prompts.plan(state["ticket"], patches.repo_map(repo)),
+    raw, _ = gw.complete(Task(TaskKind.PLAN, prompts.plan(state["ticket"], patches.repo_map(repo), state.get("history")),
                               max_output_tokens=8_192, node="plan"), run_id=state["run_id"])
     try:
         data = _json(raw)
